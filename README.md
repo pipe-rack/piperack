@@ -1,10 +1,10 @@
 # Piperack
 
-**Runs concurrent commands without turning your terminal into a crime scene.**
+**Run concurrent commands without turning your terminal into a crime scene.**
 
-Concurrency is not the problem. Unreadable output is.
+![Piperack TUI](docs/piperack.png)
 
-Stop juggling terminal tabs. Stop squinting at interleaved logs where a stack trace from your API gets mixed with Webpack build noise. If you are still running `npm-run-all` or `concurrently` and hoping for the best, you are wasting your time deciphering chaos.
+Stop juggling terminal tabs. Stop squinting at interleaved logs where a stack trace from your API gets mixed with Webpack build noise. If you are still running `npm-run-all` or `concurrently` and hoping for the best, you are wasting your time deciphering chaos. Concurrency is not the problem. Unreadable output is.
 
 Piperack fixes this. It replaces your fragile manual workflow with a deterministic, structured TUI. One command. Zero headaches.
 
@@ -16,10 +16,6 @@ Piperack fixes this. It replaces your fragile manual workflow with a determinist
 brew tap pipe-rack/homebrew-tap
 brew install pipe-rack/homebrew-tap/piperack
 ```
-
-## Same commands. One is readable.
-
-*[Insert Screenshot: Left side chaotic 'concurrently' output vs Right side clean Piperack TUI]*
 
 **Prefixing lines is not observability.**
 
@@ -45,8 +41,15 @@ piperack --name api -- cargo run --name web -- pnpm dev
 Configured for sanity:
 
 ```bash
-cargo run -- --config examples/full_stack.toml
+piperack --config examples/full_stack.toml
 ```
+
+## Documentation
+
+- [Installation](docs/installation.md)
+- [Usage](docs/usage.md)
+- [Configuration](docs/configuration.md)
+- [Architecture](docs/architecture.md)
 
 ## Configuration
 
@@ -105,11 +108,6 @@ Your terminal can handle more than stdout.
 | `g` | **Group Restart** (Restart by tag) |
 | `Mouse` | Select process & scroll logs |
 
-## Install from source (Cargo)
-
-```bash
-cargo install piperack
-```
 
 ## Contributing
 
