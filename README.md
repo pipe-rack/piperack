@@ -10,6 +10,13 @@ Piperack fixes this. It replaces your fragile manual workflow with a determinist
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg) ![Rust](https://img.shields.io/badge/built_with-Rust-black.svg)
 
+## Install (Homebrew)
+
+```bash
+brew tap pipe-rack/homebrew-tap
+brew install pipe-rack/homebrew-tap/piperack
+```
+
 ## Same commands. One is readable.
 
 *[Insert Screenshot: Left side chaotic 'concurrently' output vs Right side clean Piperack TUI]*
@@ -98,7 +105,7 @@ Your terminal can handle more than stdout.
 | `g` | **Group Restart** (Restart by tag) |
 | `Mouse` | Select process & scroll logs |
 
-## Installation
+## Install from source (Cargo)
 
 ```bash
 cargo install piperack
