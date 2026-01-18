@@ -30,7 +30,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - if: matrix.use_cross
-        uses: taiki-e/setup-cross@v2
+        name: Install cross
+        run: cargo install cross --locked
       - name: Build
         shell: bash
         run: |
