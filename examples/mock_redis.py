@@ -1,24 +1,28 @@
+import os
 import socket
-import time
 import sys
-import logging
+from datetime import datetime
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+
+def log(level: str, msg: str) -> None:
+    ts = datetime.utcnow().strftime("%d %b %Y %H:%M:%S.%f")[:-3]
+    print(f"[{os.getpid()}] {ts} {level} {msg}", flush=True)
+
 
 port = 6379
 try:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(('127.0.0.1', port))
+    sock.bind(("127.0.0.1", port))
     sock.listen(1)
-    logging.info(f"Redis-mock listening on port {port}")
-except Exception as e:
-    logging.error(f"Failed to bind port {port}: {e}")
+    log("*", f"Ready to accept connections at 127.0.0.1:{port}")
+except Exception as exc:
+    log("#", f"Failed to bind port {port}: {exc}")
     sys.exit(1)
 
 while True:
     try:
         conn, addr = sock.accept()
-        logging.info(f"Connection from {addr}")
+        log("-", f"Accepted connection from {addr[0]}:{addr[1]}")
         conn.close()
-    except:
+    except Exception:
         pass

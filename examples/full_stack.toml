@@ -46,10 +46,12 @@ ready_check = { delay = 2000 }
 json_log = true
 watch = ["examples/mock_worker.sh"]
 
-# 5. Frontend - Simulated build
+# 5. Frontend - Dev server
 [[process]]
 name = "web"
-cmd = "bash -c 'while true; do echo \"[webpack] Building...\"; sleep 5; echo \"[webpack] Compiled successfully\"; sleep 10; done'"
+cmd = "bash examples/mock_web.sh"
 color = "magenta"
 tags = ["frontend"]
 depends_on = ["api"]
+ready_check = { log = "Local:" }
+watch = ["examples/mock_web.sh"]

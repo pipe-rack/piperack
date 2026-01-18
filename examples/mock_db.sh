@@ -4,23 +4,25 @@
 log() {
     level=$1
     msg=$2
+    component=${3:-"db"}
     ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    echo "{\"level\": \"$level\", \"timestamp\": \"$ts\", \"source\": \"postgres\", \"msg\": \"$msg\"}"
+    echo "{\"level\": \"$level\", \"timestamp\": \"$ts\", \"service\": \"postgres\", \"component\": \"$component\", \"pid\": $$, \"msg\": \"$msg\"}"
 }
 
-log "info" "Database initializing..."
+log "info" "starting PostgreSQL 16.1" "startup"
 sleep 2
-log "info" "Loading configuration..."
+log "info" "reading configuration files" "startup"
 sleep 1
-log "info" "Setting up storage engine..."
+log "info" "initializing storage engine" "startup"
 sleep 2
 # The readiness check looks for this string. It still exists inside the JSON.
-log "info" "Database is ready to accept connections on port 5432"
+log "info" "Database is ready to accept connections" "startup"
+log "info" "listening on 127.0.0.1:5432" "listener"
 
 while true; do
-    sleep 3
-    log "info" "executing checkpoint"
-    sleep 0.5
-    log "debug" "vacuuming table 'users'"
     sleep 4
+    log "info" "checkpoint complete: wrote 12 buffers, 0 WAL files recycled" "checkpoint"
+    sleep 2
+    log "info" "autovacuum: ANALYZE public.orders" "autovacuum"
+    sleep 5
 done
