@@ -1,0 +1,55 @@
+# Full Stack Simulation
+# Run with: cargo run -- --config examples/full_stack.toml
+
+prefix_colors = true
+timestamp = true
+
+# 1. Database - The foundation
+[[process]]
+name = "postgres"
+cmd = "bash examples/mock_db.sh"
+color = "blue"
+tags = ["db", "backend"]
+# Wait until this log line appears inside the JSON message
+ready_check = { log = "Database is ready" }
+# Parse JSON logs
+json_log = true
+watch = ["examples/mock_db.sh"]
+
+# 2. Redis - The cache (uses python to open a real port)
+[[process]]
+name = "redis"
+cmd = "python3 examples/mock_redis.py"
+color = "red"
+tags = ["db", "cache"]
+# Wait until localhost:6379 is open
+ready_check = { tcp = 6379 }
+
+# 3. API - Depends on DB and Redis
+[[process]]
+name = "api"
+cmd = "bash examples/mock_api.sh"
+color = "green"
+tags = ["backend", "service"]
+depends_on = ["postgres", "redis"]
+json_log = true
+watch = ["examples/mock_api.sh"]
+
+# 4. Worker - Background tasks
+[[process]]
+name = "worker"
+cmd = "bash examples/mock_worker.sh"
+color = "yellow"
+tags = ["backend", "worker"]
+depends_on = ["redis"]
+ready_check = { delay = 2000 }
+json_log = true
+watch = ["examples/mock_worker.sh"]
+
+# 5. Frontend - Simulated build
+[[process]]
+name = "web"
+cmd = "bash -c 'while true; do echo \"[webpack] Building...\"; sleep 5; echo \"[webpack] Compiled successfully\"; sleep 10; done'"
+color = "magenta"
+tags = ["frontend"]
+depends_on = ["api"]

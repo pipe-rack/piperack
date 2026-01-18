@@ -1,0 +1,17 @@
+[[process]]
+name = "alpha"
+cmd = "./examples/lorem_alpha.sh"
+color = "cyan"
+follow = true
+
+[[process]]
+name = "beta"
+cmd = "./examples/lorem_beta.sh"
+color = "yellow"
+follow = true
+
+[[process]]
+name = "prompt"
+cmd = "./examples/input_echo.sh"
+color = "magenta"
+follow = true

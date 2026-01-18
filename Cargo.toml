@@ -1,0 +1,23 @@
+[package]
+name = "piperack"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time", "io-util", "net"] }
+ratatui = "0.26"
+crossterm = "0.27"
+shell-words = "1"
+strip-ansi-escapes = "0.2"
+notify = "6"
+globset = "0.4"
+ignore = "0.4"
+serde_json = "1.0.149"
+regex = "1.12.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

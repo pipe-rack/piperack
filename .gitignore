@@ -1,0 +1,7 @@
+# Markdown
+*.md
+!README.md
+!CONTRIBUTION.md
+
+# Rust build output
+target/
