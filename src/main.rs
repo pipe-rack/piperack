@@ -6,6 +6,7 @@
 
 mod app;
 mod config;
+mod ansi;
 mod events;
 mod output;
 mod process;

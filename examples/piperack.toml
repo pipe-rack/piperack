@@ -15,3 +15,9 @@ name = "prompt"
 cmd = "./examples/input_echo.sh"
 color = "magenta"
 follow = true
+
+[[process]]
+name = "ansi"
+cmd = "./examples/ansi_demo.sh"
+color = "blue"
+follow = true

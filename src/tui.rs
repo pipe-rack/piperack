@@ -15,6 +15,7 @@ use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wr
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+use crate::ansi::ansi_spans;
 use crate::app::{App, InputMode};
 use crate::output::sanitize_text;
 use crate::process::ProcessStatus;
@@ -90,7 +91,7 @@ pub fn draw(app: &mut App, terminal: &mut TuiTerminal) -> io::Result<()> {
                 .logs
                 .iter()
                 .last()
-                .map(|l| sanitize_text(&l.text, app.strip_ansi))
+                .map(|l| strip_carriage(&sanitize_text(&l.text, true)))
                 .unwrap_or_default();
             
             let mut text = Text::default();
@@ -317,26 +318,41 @@ fn render_log_lines(app: &App, height: usize, width: usize) -> (Text<'static>, u
 
     // Helper to process a single log line
     let process_line = |text: &str, name: &str, color: Option<&str>| -> Vec<Line<'static>> {
-        let sanitized = sanitize_text(text, app.strip_ansi);
-        
+        let plain = strip_carriage(&sanitize_text(text, true));
         if let Some(query) = &app.filter_query {
-            if !sanitized.contains(query) {
+            if !plain.contains(query) {
                 return Vec::new();
             }
         }
 
-        let content = if app.json_formatting {
-            crate::output::format_json(&sanitized)
+        let content_plain = if app.json_formatting {
+            crate::output::format_json(&plain)
         } else {
-            sanitized
+            plain.clone()
         };
 
         let name_style = process_color(color);
         let prefix = format!("{} \u{203a} ", name);
         let prefix_len = prefix.chars().count();
         let indent = " ".repeat(prefix_len);
+        let use_ansi = !app.strip_ansi && !app.json_formatting && app.search_query.is_none();
 
-        content.lines().enumerate().map(|(i, line)| {
+        if use_ansi {
+            return text
+                .lines()
+                .enumerate()
+                .map(|(i, line)| {
+                    let current_prefix = if i == 0 { &prefix } else { &indent };
+                    let mut spans = Vec::new();
+                    spans.push(Span::styled(current_prefix.to_string(), name_style));
+                    spans.extend(ansi_spans(line));
+                    let trimmed = truncate_spans(spans, width.saturating_sub(1));
+                    Line::from(trimmed)
+                })
+                .collect();
+        }
+
+        content_plain.lines().enumerate().map(|(i, line)| {
             let current_prefix = if i == 0 { &prefix } else { &indent };
             let combined = format!("{}{}", current_prefix, line);
             let trimmed = truncate(&combined, width.saturating_sub(1));
@@ -591,4 +607,45 @@ fn truncate(text: &str, max: usize) -> String {
     let mut out = text.chars().take(max.saturating_sub(1)).collect::<String>();
     out.push('~');
     out
+}
+
+fn truncate_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
+    if max == 0 {
+        return Vec::new();
+    }
+    let total_len: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+    if total_len <= max {
+        return spans;
+    }
+
+    let mut remaining = max.saturating_sub(1);
+    let mut out = Vec::new();
+    for span in spans {
+        if remaining == 0 {
+            break;
+        }
+        let content = span.content.as_ref();
+        let count = content.chars().count();
+        if count <= remaining {
+            out.push(span);
+            remaining -= count;
+        } else {
+            let truncated = content.chars().take(remaining).collect::<String>();
+            out.push(Span::styled(truncated, span.style));
+            remaining = 0;
+        }
+    }
+
+    if let Some(last) = out.last_mut() {
+        let mut content = last.content.to_string();
+        content.push('~');
+        last.content = content.into();
+    } else {
+        out.push(Span::raw("~"));
+    }
+    out
+}
+
+fn strip_carriage(text: &str) -> String {
+    text.rsplit('\r').next().unwrap_or("").to_string()
 }
