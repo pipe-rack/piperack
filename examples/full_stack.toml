@@ -3,6 +3,9 @@
 
 prefix_colors = true
 timestamp = true
+# Allow time to observe graceful shutdown logs from the worker.
+shutdown_sigint_ms = 7000
+shutdown_sigterm_ms = 1500
 
 # 1. Database - The foundation
 [[process]]

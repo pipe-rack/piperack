@@ -20,6 +20,8 @@ These options control the overall behavior of Piperack.
 | `kill_others_on_fail` | `boolean` | `false` | If one process fails (non-zero exit), kill all others. |
 | `restart_tries` | `integer` | - | Maximum number of restart attempts (default: infinite). |
 | `restart_delay_ms` | `integer` | - | Delay in milliseconds before restarting a process. |
+| `shutdown_sigint_ms` | `integer` | `800` | Time to wait after sending SIGINT before escalating. |
+| `shutdown_sigterm_ms` | `integer` | `800` | Time to wait after sending SIGTERM before force-killing. |
 | `handle_input` | `boolean` | `true` | Enable stdin forwarding. |
 | `log_file` | `string` | - | Template for writing logs to files (e.g., `logs/{name}.log`). |
 

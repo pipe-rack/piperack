@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 use crate::output::{sanitize_text, LogLine, StreamKind, TimelineBuffer, TimelineEntry};
-use crate::process::{ProcessState, ProcessStatus, ProcessSpec};
+use crate::process::{ProcessSpec, ProcessState, ProcessStatus};
 
 /// Modes of user input interaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +74,12 @@ pub struct App {
     pub use_symbols: bool,
     /// Whether to show the help modal/overlay.
     pub show_help: bool,
+    log_viewport: Option<LogViewport>,
+    visible_raw_lines: Vec<String>,
+    selection_start: Option<usize>,
+    selection_end: Option<usize>,
+    selection_active: bool,
+    selection_scope: Option<SelectionScope>,
     status_message: Option<StatusMessage>,
 }
 
@@ -96,12 +102,36 @@ pub enum AppAction {
     SendInputText(usize, String),
     /// Send raw bytes to a process's stdin.
     SendInputBytes(usize, Vec<u8>),
+    /// Copy selected logs (or full buffer) to clipboard.
+    CopySelection,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum StatusLevel {
+    Info,
+    Warning,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LogViewport {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SelectionScope {
+    Timeline,
+    Process(usize),
 }
 
 #[derive(Debug, Clone)]
 struct StatusMessage {
     text: String,
     at: Instant,
+    ttl: Option<Duration>,
+    level: StatusLevel,
 }
 
 impl App {
@@ -143,6 +173,12 @@ impl App {
             strip_ansi: false,
             use_symbols,
             show_help: false,
+            log_viewport: None,
+            visible_raw_lines: Vec::new(),
+            selection_start: None,
+            selection_end: None,
+            selection_active: false,
+            selection_scope: None,
             status_message: None,
         }
     }
@@ -184,7 +220,10 @@ impl App {
             .then(|| self.processes.get(id).map(|p| p.follow).unwrap_or(true))
             .unwrap_or(false);
         if let Some(process) = self.processes.get_mut(id) {
-            let dropped = process.logs.push(LogLine { text: line.clone(), stream });
+            let dropped = process.logs.push(LogLine {
+                text: line.clone(),
+                stream,
+            });
             if dropped && !process.follow && process.scroll > 0 {
                 process.scroll -= 1;
             }
@@ -233,7 +272,23 @@ impl App {
                         self.selected = index;
                         self.update_search_matches();
                     }
+                } else if let Some(row) = self.log_row_at(mouse.row, mouse.column) {
+                    self.freeze_follow_for_selection();
+                    self.selection_start = Some(row);
+                    self.selection_end = Some(row);
+                    self.selection_active = true;
+                    self.selection_scope = Some(self.current_selection_scope());
                 }
+            }
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                if self.selection_active {
+                    if let Some(row) = self.log_row_at(mouse.row, mouse.column) {
+                        self.selection_end = Some(row);
+                    }
+                }
+            }
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                self.selection_active = false;
             }
             MouseEventKind::ScrollDown => self.scroll_down(3),
             MouseEventKind::ScrollUp => self.scroll_up(3),
@@ -387,12 +442,12 @@ impl App {
                 AppAction::Quit
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-                AppAction::Quit
+                AppAction::CopySelection
             }
             KeyCode::Up => {
                 if self.selected > 0 {
                     self.exit_input_mode();
+                    self.clear_selection();
                     self.selected -= 1;
                     self.update_search_matches();
                     if self.selected_following() {
@@ -404,6 +459,7 @@ impl App {
             KeyCode::Down => {
                 if self.selected + 1 < self.processes.len() {
                     self.exit_input_mode();
+                    self.clear_selection();
                     self.selected += 1;
                     self.update_search_matches();
                     if self.selected_following() {
@@ -415,6 +471,7 @@ impl App {
             KeyCode::Tab => {
                 if !self.processes.is_empty() {
                     self.exit_input_mode();
+                    self.clear_selection();
                     self.selected = (self.selected + 1) % self.processes.len();
                     self.update_search_matches();
                     if self.selected_following() {
@@ -444,6 +501,7 @@ impl App {
             }
             KeyCode::Char('t') => {
                 self.exit_input_mode();
+                self.clear_selection();
                 self.timeline_view = !self.timeline_view;
                 self.update_search_matches();
                 if self.is_following() {
@@ -517,6 +575,7 @@ impl App {
 
     pub fn scroll_up(&mut self, amount: usize) {
         let view = self.log_view_height.max(1);
+        self.clear_selection();
         if self.timeline_view {
             let max_scroll = self.timeline.len().saturating_sub(view);
             let current = if self.timeline_follow {
@@ -533,7 +592,11 @@ impl App {
         if let Some(process) = self.selected_process_mut() {
             let len = process.logs.len();
             let max_scroll = len.saturating_sub(view);
-            let current = if process.follow { max_scroll } else { process.scroll };
+            let current = if process.follow {
+                max_scroll
+            } else {
+                process.scroll
+            };
             let next = current.saturating_sub(amount).min(max_scroll);
             process.scroll = next;
             process.follow = false;
@@ -542,6 +605,7 @@ impl App {
 
     pub fn scroll_down(&mut self, amount: usize) {
         let view = self.log_view_height.max(1);
+        self.clear_selection();
         if self.timeline_view {
             let max_scroll = self.timeline.len().saturating_sub(view);
             let current = if self.timeline_follow {
@@ -558,7 +622,11 @@ impl App {
         if let Some(process) = self.selected_process_mut() {
             let len = process.logs.len();
             let max_scroll = len.saturating_sub(view);
-            let current = if process.follow { max_scroll } else { process.scroll };
+            let current = if process.follow {
+                max_scroll
+            } else {
+                process.scroll
+            };
             let next = (current + amount).min(max_scroll);
             process.scroll = next;
             process.follow = next == max_scroll;
@@ -566,6 +634,7 @@ impl App {
     }
 
     pub fn scroll_to_top(&mut self) {
+        self.clear_selection();
         if self.timeline_view {
             self.timeline_scroll = 0;
             self.timeline_follow = false;
@@ -579,6 +648,7 @@ impl App {
 
     pub fn ensure_follow(&mut self) {
         let view = self.log_view_height.max(1);
+        self.clear_selection();
         if self.timeline_view {
             let max_scroll = self.timeline.len().saturating_sub(view);
             self.timeline_scroll = max_scroll;
@@ -695,7 +765,10 @@ impl App {
             }
             ProcessStatus::Failed { error } => format!("failed ({})", error),
         };
-        let pid = process.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
+        let pid = process
+            .pid
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".into());
         let lines = process.logs.len();
         let elapsed = process
             .started_at
@@ -714,20 +787,145 @@ impl App {
         )
     }
 
-    pub fn status_message(&self) -> Option<&str> {
+    pub fn status_message(&self) -> Option<(&str, StatusLevel)> {
         if let Some(message) = &self.status_message {
-            if message.at.elapsed() < Duration::from_secs(3) {
-                return Some(message.text.as_str());
+            let still_visible = match message.ttl {
+                Some(ttl) => message.at.elapsed() < ttl,
+                None => true,
+            };
+            if still_visible {
+                return Some((message.text.as_str(), message.level));
             }
         }
         None
     }
 
+    pub fn set_log_viewport(&mut self, viewport: LogViewport) {
+        self.log_viewport = Some(viewport);
+    }
+
+    pub fn set_visible_raw_lines(&mut self, lines: Vec<String>) {
+        self.visible_raw_lines = lines;
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection_start = None;
+        self.selection_end = None;
+        self.selection_active = false;
+        self.selection_scope = None;
+    }
+
+    pub fn selection_range(&self) -> Option<(usize, usize)> {
+        let scope = self.selection_scope?;
+        if !self.selection_scope_matches(scope) {
+            return None;
+        }
+        let start = self.selection_start?;
+        let end = self.selection_end?;
+        let (start, end) = if start <= end { (start, end) } else { (end, start) };
+        if self.visible_raw_lines.is_empty() {
+            return None;
+        }
+        let max_idx = self.visible_raw_lines.len().saturating_sub(1);
+        Some((start.min(max_idx), end.min(max_idx)))
+    }
+
+    pub fn selection_range_for(&self, len: usize) -> Option<(usize, usize)> {
+        let scope = self.selection_scope?;
+        if !self.selection_scope_matches(scope) || len == 0 {
+            return None;
+        }
+        let start = self.selection_start?;
+        let end = self.selection_end?;
+        let (start, end) = if start <= end { (start, end) } else { (end, start) };
+        let max_idx = len.saturating_sub(1);
+        Some((start.min(max_idx), end.min(max_idx)))
+    }
+
+    pub fn selection_text(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        if start > end || self.visible_raw_lines.is_empty() {
+            return None;
+        }
+        Some(self.visible_raw_lines[start..=end].join("\n"))
+    }
+
+    pub fn selected_process_raw_text(&self) -> Option<String> {
+        let process = self.selected_process()?;
+        let mut lines = Vec::new();
+        for entry in process.logs.iter() {
+            let text = strip_carriage(&sanitize_text(&entry.text, true));
+            for line in text.lines() {
+                lines.push(line.to_string());
+            }
+        }
+        if lines.is_empty() {
+            None
+        } else {
+            Some(lines.join("\n"))
+        }
+    }
+
     pub fn set_status_message(&mut self, message: impl Into<String>) {
+        self.set_status_message_with_level(message, StatusLevel::Info, Some(Duration::from_secs(3)));
+    }
+
+    pub fn set_status_warning_for(&mut self, message: impl Into<String>, ttl: Duration) {
+        self.set_status_message_with_level(message, StatusLevel::Warning, Some(ttl));
+    }
+
+    pub fn set_status_warning_persistent(&mut self, message: impl Into<String>) {
+        self.set_status_message_with_level(message, StatusLevel::Warning, None);
+    }
+
+    fn set_status_message_with_level(
+        &mut self,
+        message: impl Into<String>,
+        level: StatusLevel,
+        ttl: Option<Duration>,
+    ) {
         self.status_message = Some(StatusMessage {
             text: message.into(),
             at: Instant::now(),
+            ttl,
+            level,
         });
+    }
+
+    fn log_row_at(&self, row: u16, col: u16) -> Option<usize> {
+        let viewport = self.log_viewport?;
+        if row < viewport.y || row >= viewport.y + viewport.height {
+            return None;
+        }
+        if col < viewport.x || col >= viewport.x + viewport.width {
+            return None;
+        }
+        Some((row - viewport.y) as usize)
+    }
+
+    fn current_selection_scope(&self) -> SelectionScope {
+        if self.timeline_view {
+            SelectionScope::Timeline
+        } else {
+            SelectionScope::Process(self.selected)
+        }
+    }
+
+    fn freeze_follow_for_selection(&mut self) {
+        if self.timeline_view {
+            self.timeline_follow = false;
+            return;
+        }
+        if let Some(process) = self.selected_process_mut() {
+            process.follow = false;
+        }
+    }
+
+    fn selection_scope_matches(&self, scope: SelectionScope) -> bool {
+        match scope {
+            SelectionScope::Timeline => self.timeline_view,
+            SelectionScope::Process(id) => !self.timeline_view && self.selected == id,
+        }
     }
 
     pub fn input_line(&self) -> &str {
@@ -812,8 +1010,13 @@ impl App {
         let mut last_tag: Option<&str> = None;
 
         for (i, process) in self.processes.iter().enumerate() {
-            let tag = process.spec.tags.first().map(|s| s.as_str()).unwrap_or("Ungrouped");
-            
+            let tag = process
+                .spec
+                .tags
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("Ungrouped");
+
             if last_tag != Some(tag) {
                 // This is a header row
                 if current_ui_index == row {
@@ -830,6 +1033,10 @@ impl App {
         }
         None
     }
+}
+
+fn strip_carriage(text: &str) -> String {
+    text.rsplit('\r').next().unwrap_or("").to_string()
 }
 
 fn format_duration(duration: Duration) -> String {

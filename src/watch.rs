@@ -37,7 +37,11 @@ pub fn spawn_watchers(processes: &[ProcessState], tx: mpsc::Sender<Event>) {
     }
 }
 
-fn watch_process(id: usize, spec: &crate::process::ProcessSpec, tx: mpsc::Sender<Event>) -> Result<()> {
+fn watch_process(
+    id: usize,
+    spec: &crate::process::ProcessSpec,
+    tx: mpsc::Sender<Event>,
+) -> Result<()> {
     let base = spec
         .cwd
         .as_ref()
@@ -109,7 +113,9 @@ fn resolve_watch_paths(base: &Path, paths: &[String]) -> Vec<PathBuf> {
 }
 
 fn is_relevant(event: &notify::Result<NotifyEvent>, matcher: &IgnoreMatcher) -> bool {
-    let Ok(event) = event else { return true; };
+    let Ok(event) = event else {
+        return true;
+    };
     if event.paths.is_empty() {
         return true;
     }
