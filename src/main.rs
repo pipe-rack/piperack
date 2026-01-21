@@ -4,9 +4,10 @@
 //! loads configuration, and sets up the main event loop to manage processes
 //! and user interaction.
 
+mod ansi;
+mod clipboard;
 mod app;
 mod config;
-mod ansi;
 mod events;
 mod output;
 mod process;
@@ -17,20 +18,20 @@ mod watch;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{CommandFactory, Parser, Subcommand};
-use clap::builder::Styles;
 use clap::builder::styling::{AnsiColor, Effects, Style};
+use clap::builder::Styles;
+use clap::{CommandFactory, Parser, Subcommand};
 use tokio::sync::mpsc;
 
 use crate::app::{App, AppAction};
 use crate::config::ProcessConfig;
-use crate::events::Event;
+use crate::events::{Event, ProcessSignal};
 use crate::output::StreamKind;
 use crate::process::{ProcessSpec, ProcessState};
-use crate::runner::ProcessManager;
+use crate::runner::{ProcessManager, ShutdownConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum OutputMode {
@@ -104,6 +105,12 @@ struct Cli {
     /// Delay before restarting (ms).
     #[arg(long)]
     restart_delay_ms: Option<u64>,
+    /// Time to wait after sending SIGINT before escalating (ms).
+    #[arg(long)]
+    shutdown_sigint_ms: Option<u64>,
+    /// Time to wait after sending SIGTERM before force-killing (ms).
+    #[arg(long)]
+    shutdown_sigterm_ms: Option<u64>,
     /// Disable input forwarding.
     #[arg(long)]
     no_input: bool,
@@ -169,7 +176,8 @@ async fn main() -> Result<()> {
     }
 
     let (event_tx, mut event_rx) = mpsc::channel(256);
-    let mut manager = ProcessManager::new(specs.clone(), event_tx.clone());
+    let shutdown = ShutdownConfig::new(settings.shutdown_sigint_ms, settings.shutdown_sigterm_ms);
+    let mut manager = ProcessManager::new(specs.clone(), event_tx.clone(), shutdown);
     let mut app = App::new(
         specs,
         settings.max_lines,
@@ -180,7 +188,11 @@ async fn main() -> Result<()> {
 
     manager.start_all().await?;
 
-    let mut terminal = if settings.no_ui { None } else { Some(tui::init_terminal()?) };
+    let mut terminal = if settings.no_ui {
+        None
+    } else {
+        Some(tui::init_terminal()?)
+    };
     let tick_rate = Duration::from_millis(150);
 
     if !settings.no_ui {
@@ -189,10 +201,18 @@ async fn main() -> Result<()> {
         spawn_stdin_listener(event_tx.clone());
     }
     watch::spawn_watchers(&app.processes, event_tx.clone());
+    spawn_signal_listener(event_tx.clone());
 
     let mut ticker = tokio::time::interval(tick_rate);
     let mut result = Ok(());
     let mut output_state = OutputState::new(&app.processes, &settings);
+    let mut shutdown_in_progress = false;
+    let mut shutdown_started_at: Option<Instant> = None;
+    const MIN_SHUTDOWN_DISPLAY: Duration = Duration::from_millis(1500);
+    const MIN_SIGNAL_DISPLAY: Duration = Duration::from_millis(1500);
+    let mut shutdown_pending: Option<ProcessSignal> = None;
+    let mut shutdown_dispatch_at: Option<Instant> = None;
+    let mut last_signal_at: Option<Instant> = None;
 
     loop {
         tokio::select! {
@@ -277,26 +297,37 @@ async fn main() -> Result<()> {
                             .get(id)
                             .map(|p| p.spec.name.as_str())
                             .unwrap_or("process");
-                        let message = match code {
-                            Some(0) => format!("{} exited successfully", name),
-                            Some(code) => format!("{} exited with code {}", name, code),
-                            None => format!("{} exited", name),
-                        };
-                        app.set_status_message(message);
+                        if !shutdown_in_progress {
+                            let signal_recent = last_signal_at
+                                .map(|at| at.elapsed() < MIN_SIGNAL_DISPLAY)
+                                .unwrap_or(false);
+                            if !signal_recent {
+                                let message = match code {
+                                    Some(0) => format!("{} exited successfully", name),
+                                    Some(code) => format!("{} exited with code {}", name, code),
+                                    None => format!("{} exited", name),
+                                };
+                                app.set_status_message(message);
+                            }
+                        }
                         let line = match code {
                             Some(0) => "process ended successfully".to_string(),
                             Some(code) => format!("process ended with code {}", code),
                             None => "process ended".to_string(),
                         };
                         emit_tool_message(id, line, &mut app, &settings, &mut output_state);
-                        let restart_info = handle_restart(
-                            id,
-                            code,
-                            &app,
-                            &settings,
-                            &mut restart_attempts,
-                            &event_tx,
-                        );
+                        let restart_info = if shutdown_in_progress {
+                            None
+                        } else {
+                            handle_restart(
+                                id,
+                                code,
+                                &app,
+                                &settings,
+                                &mut restart_attempts,
+                                &event_tx,
+                            )
+                        };
                         if let Some(info) = restart_info {
                             emit_tool_message(
                                 id,
@@ -306,16 +337,27 @@ async fn main() -> Result<()> {
                                 &mut output_state,
                             );
                         }
-                        handle_exit_policy(
-                            id,
-                            code,
-                            &mut app,
-                            &settings,
-                            &mut output_state,
-                            &mut manager,
-                            &mut result,
-                        )
-                        .await;
+                        if shutdown_in_progress {
+                            output_state.handle_exit(id, code);
+                            let ready_to_exit = output_state.all_exited()
+                                && shutdown_started_at
+                                    .map(|start| start.elapsed() >= MIN_SHUTDOWN_DISPLAY)
+                                    .unwrap_or(false);
+                            if ready_to_exit {
+                                app.should_quit = true;
+                            }
+                        } else {
+                            handle_exit_policy(
+                                id,
+                                code,
+                                &mut app,
+                                &settings,
+                                &mut output_state,
+                                &mut manager,
+                                &mut result,
+                            )
+                            .await;
+                        }
                     }
                     Event::ProcessFailed { id, error } => {
                         let error_message = error.clone();
@@ -325,8 +367,15 @@ async fn main() -> Result<()> {
                             .get(id)
                             .map(|p| p.spec.name.as_str())
                             .unwrap_or("process");
-                        let message = format!("{} failed: {}", name, error_message);
-                        app.set_status_message(message);
+                        if !shutdown_in_progress {
+                            let signal_recent = last_signal_at
+                                .map(|at| at.elapsed() < MIN_SIGNAL_DISPLAY)
+                                .unwrap_or(false);
+                            if !signal_recent {
+                                let message = format!("{} failed: {}", name, error_message);
+                                app.set_status_message(message);
+                            }
+                        }
                         emit_tool_message(
                             id,
                             format!("process failed: {}", error_message),
@@ -334,14 +383,18 @@ async fn main() -> Result<()> {
                             &settings,
                             &mut output_state,
                         );
-                        let restart_info = handle_restart(
-                            id,
-                            Some(1),
-                            &app,
-                            &settings,
-                            &mut restart_attempts,
-                            &event_tx,
-                        );
+                        let restart_info = if shutdown_in_progress {
+                            None
+                        } else {
+                            handle_restart(
+                                id,
+                                Some(1),
+                                &app,
+                                &settings,
+                                &mut restart_attempts,
+                                &event_tx,
+                            )
+                        };
                         if let Some(info) = restart_info {
                             emit_tool_message(
                                 id,
@@ -351,20 +404,74 @@ async fn main() -> Result<()> {
                                 &mut output_state,
                             );
                         }
-                        handle_exit_policy(
+                        if shutdown_in_progress {
+                            output_state.handle_exit(id, Some(1));
+                            let ready_to_exit = output_state.all_exited()
+                                && shutdown_started_at
+                                    .map(|start| start.elapsed() >= MIN_SHUTDOWN_DISPLAY)
+                                    .unwrap_or(false);
+                            if ready_to_exit {
+                                app.should_quit = true;
+                            }
+                        } else {
+                            handle_exit_policy(
+                                id,
+                                Some(1),
+                                &mut app,
+                                &settings,
+                                &mut output_state,
+                                &mut manager,
+                                &mut result,
+                            )
+                            .await;
+                        }
+                    }
+                    Event::ProcessSignal { id, signal } => {
+                        let name = app
+                            .processes
+                            .get(id)
+                            .map(|p| p.spec.name.as_str())
+                            .unwrap_or("process");
+                        let label = signal.label();
+                        if shutdown_in_progress || shutdown_pending.is_some() {
+                            app.set_status_warning_persistent(format!(
+                                "shutting down — sent {} to {}",
+                                label, name
+                            ));
+                        } else {
+                            last_signal_at = Some(Instant::now());
+                            app.set_status_warning_for(
+                                format!("sent {} to {}", label, name),
+                                MIN_SIGNAL_DISPLAY,
+                            );
+                        }
+                        emit_tool_message(
                             id,
-                            Some(1),
+                            format!("sent {}", label),
                             &mut app,
                             &settings,
                             &mut output_state,
-                            &mut manager,
-                            &mut result,
-                        )
-                        .await;
+                        );
                     }
                     Event::Restart { id } => {
                         if let Err(err) = manager.restart_process(id).await {
                             app.on_process_failed(id, err.to_string());
+                        }
+                    }
+                    Event::Shutdown { signal } => {
+                        if !shutdown_in_progress {
+                            let label = signal.label();
+                            app.should_quit = false;
+                            app.set_status_warning_persistent(format!(
+                                "received {}, shutting down",
+                                label
+                            ));
+                            shutdown_pending = Some(signal);
+                            shutdown_dispatch_at = if settings.no_ui {
+                                Some(Instant::now())
+                            } else {
+                                None
+                            };
                         }
                     }
                     Event::Stdin(bytes) => {
@@ -374,11 +481,25 @@ async fn main() -> Result<()> {
                     }
                     Event::Key(key) => {
                         let action = app.handle_key(key);
-                        handle_app_action(action, &mut app, &mut manager, &mut restart_attempts).await;
+                        handle_app_action(
+                            action,
+                            &mut app,
+                            &mut manager,
+                            &mut restart_attempts,
+                            &event_tx,
+                        )
+                        .await;
                     }
                     Event::Mouse(mouse) => {
                         let action = app.handle_mouse(mouse);
-                        handle_app_action(action, &mut app, &mut manager, &mut restart_attempts).await;
+                        handle_app_action(
+                            action,
+                            &mut app,
+                            &mut manager,
+                            &mut restart_attempts,
+                            &event_tx,
+                        )
+                        .await;
                     }
                     Event::Resize { width, height } => {
                         let _ = (width, height);
@@ -391,6 +512,26 @@ async fn main() -> Result<()> {
             }
             _ = ticker.tick() => {
                 manager.poll_exits().await;
+                if let Some(signal) = shutdown_pending {
+                    if shutdown_dispatch_at
+                        .map(|when| Instant::now() >= when)
+                        .unwrap_or(false)
+                    {
+                        shutdown_in_progress = true;
+                        shutdown_started_at = Some(Instant::now());
+                        shutdown_pending = None;
+                        shutdown_dispatch_at = None;
+                        manager.begin_shutdown_all(signal).await;
+                    }
+                }
+                if shutdown_in_progress
+                    && output_state.all_exited()
+                    && shutdown_started_at
+                        .map(|start| start.elapsed() >= MIN_SHUTDOWN_DISPLAY)
+                        .unwrap_or(false)
+                {
+                    app.should_quit = true;
+                }
             }
         }
 
@@ -399,6 +540,9 @@ async fn main() -> Result<()> {
                 result = Err(err.into());
                 break;
             }
+        }
+        if shutdown_pending.is_some() && shutdown_dispatch_at.is_none() && !settings.no_ui {
+            shutdown_dispatch_at = Some(Instant::now() + Duration::from_millis(100));
         }
 
         if app.should_quit {
@@ -414,22 +558,50 @@ async fn main() -> Result<()> {
 }
 
 fn spawn_input_listener(tx: mpsc::Sender<Event>) {
-    std::thread::spawn(move || {
-        loop {
-            if crossterm::event::poll(Duration::from_millis(100)).unwrap_or(false) {
-                match crossterm::event::read() {
-                    Ok(crossterm::event::Event::Key(key)) => {
-                        let _ = tx.blocking_send(Event::Key(key));
-                    }
-                    Ok(crossterm::event::Event::Mouse(mouse)) => {
-                        let _ = tx.blocking_send(Event::Mouse(mouse));
-                    }
-                    Ok(crossterm::event::Event::Resize(width, height)) => {
-                        let _ = tx.blocking_send(Event::Resize { width, height });
-                    }
-                    _ => {}
+    std::thread::spawn(move || loop {
+        if crossterm::event::poll(Duration::from_millis(100)).unwrap_or(false) {
+            match crossterm::event::read() {
+                Ok(crossterm::event::Event::Key(key)) => {
+                    let _ = tx.blocking_send(Event::Key(key));
+                }
+                Ok(crossterm::event::Event::Mouse(mouse)) => {
+                    let _ = tx.blocking_send(Event::Mouse(mouse));
+                }
+                Ok(crossterm::event::Event::Resize(width, height)) => {
+                    let _ = tx.blocking_send(Event::Resize { width, height });
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
+fn spawn_signal_listener(tx: mpsc::Sender<Event>) {
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = match signal(SignalKind::terminate()) {
+                Ok(signal) => signal,
+                Err(_) => return,
+            };
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    let _ = tx.send(Event::Shutdown { signal: ProcessSignal::SigInt }).await;
+                }
+                _ = sigterm.recv() => {
+                    let _ = tx.send(Event::Shutdown { signal: ProcessSignal::SigTerm }).await;
                 }
             }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+            let _ = tx
+                .send(Event::Shutdown {
+                    signal: ProcessSignal::SigInt,
+                })
+                .await;
         }
     });
 }
@@ -566,17 +738,27 @@ fn parse_cli_processes(args: &[String], restart_on_fail: bool) -> Result<Vec<Pro
             match args[idx].as_str() {
                 "--cwd" => {
                     idx += 1;
-                    cwd = Some(args.get(idx).ok_or_else(|| anyhow!("missing value for --cwd"))?.clone());
+                    cwd = Some(
+                        args.get(idx)
+                            .ok_or_else(|| anyhow!("missing value for --cwd"))?
+                            .clone(),
+                    );
                 }
                 "--env" => {
                     idx += 1;
-                    let kv = args.get(idx).ok_or_else(|| anyhow!("missing value for --env"))?;
+                    let kv = args
+                        .get(idx)
+                        .ok_or_else(|| anyhow!("missing value for --env"))?;
                     let (key, value) = split_env(kv)?;
                     env.insert(key, value);
                 }
                 "--color" => {
                     idx += 1;
-                    color = Some(args.get(idx).ok_or_else(|| anyhow!("missing value for --color"))?.clone());
+                    color = Some(
+                        args.get(idx)
+                            .ok_or_else(|| anyhow!("missing value for --color"))?
+                            .clone(),
+                    );
                 }
                 "--follow" => {
                     follow = true;
@@ -592,23 +774,39 @@ fn parse_cli_processes(args: &[String], restart_on_fail: bool) -> Result<Vec<Pro
                 }
                 "--pre" => {
                     idx += 1;
-                    pre_cmd = Some(args.get(idx).ok_or_else(|| anyhow!("missing value for --pre"))?.clone());
+                    pre_cmd = Some(
+                        args.get(idx)
+                            .ok_or_else(|| anyhow!("missing value for --pre"))?
+                            .clone(),
+                    );
                 }
                 "--watch" => {
                     idx += 1;
-                    watch_paths.push(args.get(idx).ok_or_else(|| anyhow!("missing value for --watch"))?.clone());
+                    watch_paths.push(
+                        args.get(idx)
+                            .ok_or_else(|| anyhow!("missing value for --watch"))?
+                            .clone(),
+                    );
                 }
                 "--watch-ignore" => {
                     idx += 1;
-                    watch_ignore.push(args.get(idx).ok_or_else(|| anyhow!("missing value for --watch-ignore"))?.clone());
+                    watch_ignore.push(
+                        args.get(idx)
+                            .ok_or_else(|| anyhow!("missing value for --watch-ignore"))?
+                            .clone(),
+                    );
                 }
                 "--watch-ignore-gitignore" => {
                     watch_ignore_gitignore = true;
                 }
                 "--watch-debounce-ms" => {
                     idx += 1;
-                    let value = args.get(idx).ok_or_else(|| anyhow!("missing value for --watch-debounce-ms"))?;
-                    watch_debounce_ms = value.parse::<u64>().map_err(|_| anyhow!("invalid --watch-debounce-ms"))?;
+                    let value = args
+                        .get(idx)
+                        .ok_or_else(|| anyhow!("missing value for --watch-debounce-ms"))?;
+                    watch_debounce_ms = value
+                        .parse::<u64>()
+                        .map_err(|_| anyhow!("invalid --watch-debounce-ms"))?;
                 }
                 other => bail!("unknown option {} for --name {}", other, name),
             }
@@ -699,6 +897,8 @@ struct ConfigMeta {
     kill_others_on_fail: Option<bool>,
     restart_tries: Option<u32>,
     restart_delay_ms: Option<u64>,
+    shutdown_sigint_ms: Option<u64>,
+    shutdown_sigterm_ms: Option<u64>,
     handle_input: Option<bool>,
     log_file: Option<String>,
 }
@@ -712,12 +912,20 @@ impl ConfigMeta {
             prefix_length: config.prefix_length,
             prefix_colors: config.prefix_colors,
             timestamp: config.timestamp,
-            output: config.output.as_deref().and_then(|v| parse_output_mode(v).ok()),
-            success: config.success.as_deref().and_then(|v| parse_success_policy(v).ok()),
+            output: config
+                .output
+                .as_deref()
+                .and_then(|v| parse_output_mode(v).ok()),
+            success: config
+                .success
+                .as_deref()
+                .and_then(|v| parse_success_policy(v).ok()),
             kill_others: config.kill_others,
             kill_others_on_fail: config.kill_others_on_fail,
             restart_tries: config.restart_tries,
             restart_delay_ms: config.restart_delay_ms,
+            shutdown_sigint_ms: config.shutdown_sigint_ms,
+            shutdown_sigterm_ms: config.shutdown_sigterm_ms,
             handle_input: config.handle_input,
             log_file: config.log_file.clone(),
         }
@@ -742,15 +950,23 @@ struct RunSettings {
     kill_others_on_fail: bool,
     restart_tries: Option<u32>,
     restart_delay_ms: Option<u64>,
+    shutdown_sigint_ms: u64,
+    shutdown_sigterm_ms: u64,
     input_enabled: bool,
     log_file: Option<String>,
 }
 
 impl RunSettings {
     fn from_cli(cli: &Cli, meta: ConfigMeta, config_max_lines: Option<usize>) -> Self {
+        const DEFAULT_SHUTDOWN_SIGINT_MS: u64 = 800;
+        const DEFAULT_SHUTDOWN_SIGTERM_MS: u64 = 800;
         let max_lines = cli.max_lines.or(config_max_lines).unwrap_or(10_000);
         let use_symbols = meta.symbols.unwrap_or(true);
-        let raw = if cli.raw { true } else { meta.raw.unwrap_or(false) };
+        let raw = if cli.raw {
+            true
+        } else {
+            meta.raw.unwrap_or(false)
+        };
         let prefix = cli.prefix.clone().or(meta.prefix);
         let prefix_length = cli.prefix_length.or(meta.prefix_length);
         let prefix_colors = if cli.prefix_colors {
@@ -766,9 +982,18 @@ impl RunSettings {
         let output_mode = cli.output.or(meta.output).unwrap_or(OutputMode::Combined);
         let success = cli.success.or(meta.success).unwrap_or(SuccessPolicy::Last);
         let kill_others = cli.kill_others || meta.kill_others.unwrap_or(false);
-        let kill_others_on_fail = cli.kill_others_on_fail || meta.kill_others_on_fail.unwrap_or(false);
+        let kill_others_on_fail =
+            cli.kill_others_on_fail || meta.kill_others_on_fail.unwrap_or(false);
         let restart_tries = cli.restart_tries.or(meta.restart_tries);
         let restart_delay_ms = cli.restart_delay_ms.or(meta.restart_delay_ms);
+        let shutdown_sigint_ms = cli
+            .shutdown_sigint_ms
+            .or(meta.shutdown_sigint_ms)
+            .unwrap_or(DEFAULT_SHUTDOWN_SIGINT_MS);
+        let shutdown_sigterm_ms = cli
+            .shutdown_sigterm_ms
+            .or(meta.shutdown_sigterm_ms)
+            .unwrap_or(DEFAULT_SHUTDOWN_SIGTERM_MS);
         let input_enabled = if cli.no_input {
             false
         } else {
@@ -790,6 +1015,8 @@ impl RunSettings {
             kill_others_on_fail,
             restart_tries,
             restart_delay_ms,
+            shutdown_sigint_ms,
+            shutdown_sigterm_ms,
             input_enabled,
             log_file,
         }
@@ -836,7 +1063,11 @@ fn parse_named_commands(cli: &Cli) -> Result<Vec<ProcessSpec>> {
         bail!("--names provided but no names parsed");
     }
     if cli.args.len() != names.len() {
-        bail!("expected {} commands for --names, got {}", names.len(), cli.args.len());
+        bail!(
+            "expected {} commands for --names, got {}",
+            names.len(),
+            cli.args.len()
+        );
     }
     let mut env_maps = vec![HashMap::new(); names.len()];
     let mut global_env = HashMap::new();
@@ -1236,8 +1467,15 @@ fn handle_restart(
         .map(|process| process.spec.restart_on_fail)
         .unwrap_or(false);
     if should_restart && code.unwrap_or(1) != 0 {
-        let attempt = restart_attempts.entry(id).and_modify(|a| *a += 1).or_insert(1);
-        if settings.restart_tries.map(|max| *attempt <= max).unwrap_or(true) {
+        let attempt = restart_attempts
+            .entry(id)
+            .and_modify(|a| *a += 1)
+            .or_insert(1);
+        if settings
+            .restart_tries
+            .map(|max| *attempt <= max)
+            .unwrap_or(true)
+        {
             let backoff = backoff_delay(*attempt, settings);
             let tx = event_tx.clone();
             tokio::spawn(async move {
@@ -1307,15 +1545,21 @@ async fn handle_app_action(
     app: &mut App,
     manager: &mut ProcessManager,
     restart_attempts: &mut HashMap<usize, u32>,
+    event_tx: &mpsc::Sender<Event>,
 ) {
     match action {
         AppAction::Quit => {
-            app.should_quit = true;
+            app.should_quit = false;
+            let _ = event_tx
+                .send(Event::Shutdown {
+                    signal: ProcessSignal::SigInt,
+                })
+                .await;
         }
         AppAction::Kill(id) => {
-            if let Err(err) = manager.kill_process(id).await {
-                app.on_process_failed(id, err.to_string());
-            }
+            manager
+                .begin_shutdown_process(id, ProcessSignal::SigInt)
+                .await;
         }
         AppAction::Restart(id) => {
             restart_attempts.remove(&id);
@@ -1354,6 +1598,21 @@ async fn handle_app_action(
         AppAction::SendInputBytes(id, bytes) => {
             if let Err(err) = manager.send_input_bytes(id, &bytes).await {
                 app.set_status_message(format!("Input failed: {}", err));
+            }
+        }
+        AppAction::CopySelection => {
+            let selection = app.selection_text();
+            let payload = selection.or_else(|| app.selected_process_raw_text());
+            if let Some(text) = payload {
+                match clipboard::copy_text(&text) {
+                    Ok(()) => app.set_status_warning_for("copied to clipboard", Duration::from_secs(2)),
+                    Err(err) => app.set_status_warning_for(
+                        format!("clipboard failed: {}", err),
+                        Duration::from_secs(3),
+                    ),
+                }
+            } else {
+                app.set_status_warning_for("nothing to copy", Duration::from_secs(2));
             }
         }
         AppAction::None => {}

@@ -7,16 +7,18 @@ use std::io::{self, Stdout};
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
+};
+use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 
 use crate::ansi::ansi_spans;
-use crate::app::{App, InputMode};
+use crate::app::{App, InputMode, LogViewport};
 use crate::output::sanitize_text;
 use crate::process::ProcessStatus;
 
@@ -39,7 +41,11 @@ pub fn init_terminal() -> io::Result<TuiTerminal> {
 /// Disables raw mode, leaves the alternate screen, and shows the cursor.
 pub fn restore_terminal(mut terminal: TuiTerminal) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -162,24 +168,42 @@ pub fn draw(app: &mut App, terminal: &mut TuiTerminal) -> io::Result<()> {
         let log_height = log_area.height as usize;
         app.set_log_view_height(log_height);
 
-        let (log_lines, total) = render_log_lines(app, log_height, log_area.width as usize);
+        let (log_lines, total, raw_lines) = render_log_lines(app, log_height, log_area.width as usize);
+        app.set_log_viewport(LogViewport {
+            x: log_area.x,
+            y: log_area.y,
+            width: log_area.width,
+            height: log_area.height,
+        });
+        app.set_visible_raw_lines(raw_lines);
         let paragraph = Paragraph::new(log_lines).block(log_block).wrap(Wrap { trim: false });
 
         frame.render_widget(paragraph, main[1]);
 
         let status_line = app.status_line();
         let default_help = if app.use_symbols {
-            "↑/↓ select | Tab cycle | Enter input | f follow | t timeline | a ansi | / search | F filter | n/N next/prev | r restart | g group | R all | k kill | j json | e export | q quit | ? help"
+            "↑/↓ select | Tab cycle | Enter input | f follow | t timeline | a ansi | / search | F filter | n/N next/prev | r restart | g group | R all | k kill | j json | e export | Ctrl+C copy | q quit | ? help"
         } else {
-            "Up/Down select | Tab cycle | Enter input | f follow | t timeline | a ansi | / search | F filter | n/N next/prev | r restart | g group | R all | k kill | j json | e export | q quit | ? help"
+            "Up/Down select | Tab cycle | Enter input | f follow | t timeline | a ansi | / search | F filter | n/N next/prev | r restart | g group | R all | k kill | j json | e export | Ctrl+C copy | q quit | ? help"
         };
-        let mut help_line = app.status_message().unwrap_or(default_help).to_string();
+        let (mut help_line, mut help_style) = if let Some((message, level)) = app.status_message() {
+            let color = match level {
+                crate::app::StatusLevel::Warning => Color::Yellow,
+                crate::app::StatusLevel::Info => Color::DarkGray,
+            };
+            (message.to_string(), Style::default().fg(color))
+        } else {
+            (default_help.to_string(), Style::default().fg(Color::DarkGray))
+        };
         if app.input_mode == InputMode::Search {
             help_line = format!("Search: {} (Esc to exit)", app.input);
+            help_style = Style::default().fg(Color::DarkGray);
         } else if app.input_mode == InputMode::Filter {
             help_line = format!("Filter: {} (Esc to exit)", app.input);
+            help_style = Style::default().fg(Color::DarkGray);
         } else if app.input_mode == InputMode::Group {
             help_line = format!("Restart Group: {}", app.input);
+            help_style = Style::default().fg(Color::DarkGray);
         } else if app.input_mode == InputMode::Input {
             let cursor = if app.use_symbols { "▌" } else { "|" };
             let divider = if app.use_symbols { " · " } else { " | " };
@@ -190,10 +214,11 @@ pub fn draw(app: &mut App, terminal: &mut TuiTerminal) -> io::Result<()> {
                 divider,
                 divider
             );
+            help_style = Style::default().fg(Color::DarkGray);
         }
         let status = Paragraph::new(Text::from(vec![
             Line::from(Span::raw(status_line)),
-            Line::from(Span::styled(help_line, Style::default().fg(Color::DarkGray))),
+            Line::from(Span::styled(help_line, help_style)),
         ]))
         .block(
             Block::default()
@@ -263,7 +288,11 @@ pub fn draw(app: &mut App, terminal: &mut TuiTerminal) -> io::Result<()> {
     Ok(())
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: ratatui::layout::Rect) -> ratatui::layout::Rect {
+fn centered_rect(
+    percent_x: u16,
+    percent_y: u16,
+    r: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -301,7 +330,9 @@ fn log_title(app: &App) -> String {
     if let Some(process) = app.selected_process() {
         match &process.status {
             ProcessStatus::Running => format!("Logs - {} (running)", process.spec.name),
-            ProcessStatus::Exited { code } => format!("Logs - {} (exited {:?})", process.spec.name, code),
+            ProcessStatus::Exited { code } => {
+                format!("Logs - {} (exited {:?})", process.spec.name, code)
+            }
             ProcessStatus::Failed { .. } => format!("Logs - {} (failed)", process.spec.name),
             ProcessStatus::Starting => format!("Logs - {} (starting)", process.spec.name),
             ProcessStatus::Idle => format!("Logs - {} (idle)", process.spec.name),
@@ -311,17 +342,17 @@ fn log_title(app: &App) -> String {
     }
 }
 
-fn render_log_lines(app: &App, height: usize, width: usize) -> (Text<'static>, usize) {
+fn render_log_lines(app: &App, height: usize, width: usize) -> (Text<'static>, usize, Vec<String>) {
     if height == 0 {
-        return (Text::default(), 0);
+        return (Text::default(), 0, Vec::new());
     }
 
     // Helper to process a single log line
-    let process_line = |text: &str, name: &str, color: Option<&str>| -> Vec<Line<'static>> {
+    let process_line = |text: &str, name: &str, color: Option<&str>| -> (Vec<Line<'static>>, Vec<String>) {
         let plain = strip_carriage(&sanitize_text(text, true));
         if let Some(query) = &app.filter_query {
             if !plain.contains(query) {
-                return Vec::new();
+                return (Vec::new(), Vec::new());
             }
         }
 
@@ -330,6 +361,7 @@ fn render_log_lines(app: &App, height: usize, width: usize) -> (Text<'static>, u
         } else {
             plain.clone()
         };
+        let raw_lines: Vec<String> = plain.lines().map(|line| line.to_string()).collect();
 
         let name_style = process_color(color);
         let prefix = format!("{} \u{203a} ", name);
@@ -338,7 +370,7 @@ fn render_log_lines(app: &App, height: usize, width: usize) -> (Text<'static>, u
         let use_ansi = !app.strip_ansi && !app.json_formatting && app.search_query.is_none();
 
         if use_ansi {
-            return text
+            let lines = text
                 .lines()
                 .enumerate()
                 .map(|(i, line)| {
@@ -350,151 +382,169 @@ fn render_log_lines(app: &App, height: usize, width: usize) -> (Text<'static>, u
                     Line::from(trimmed)
                 })
                 .collect();
+            return (lines, raw_lines);
         }
 
-        content_plain.lines().enumerate().map(|(i, line)| {
-            let current_prefix = if i == 0 { &prefix } else { &indent };
-            let combined = format!("{}{}", current_prefix, line);
-            let trimmed = truncate(&combined, width.saturating_sub(1));
-            
-            // Highlighting logic
-            if let Some(query) = &app.search_query {
-                if !query.is_empty() && trimmed.contains(query) {
-                    let mut spans = Vec::new();
-                    let highlight_style = Style::default().fg(Color::Black).bg(Color::Yellow);
-                    let mut last_idx = 0;
+        let lines = content_plain
+            .lines()
+            .enumerate()
+            .map(|(i, line)| {
+                let current_prefix = if i == 0 { &prefix } else { &indent };
+                let combined = format!("{}{}", current_prefix, line);
+                let trimmed = truncate(&combined, width.saturating_sub(1));
 
-                    for (idx, match_str) in trimmed.match_indices(query) {
-                        if idx > last_idx {
-                            let pre_match = &trimmed[last_idx..idx];
-                            // Apply prefix style if this part overlaps with prefix
-                            // This is complex because prefix is also styled.
-                            // Simplification: Apply standard prefix styling logic to the whole chunk,
-                            // but that's hard if chunk is split.
-                            // Better approach: Re-construct spans from the highlighted chunks.
-                            
-                            // To handle prefix styling correctly with arbitrary highlighting is complex.
-                            // We will prioritize highlighting.
-                            // But we should try to keep prefix color if possible.
-                            
-                            // Let's iterate chars or use a simpler heuristic.
-                            // If the chunk starts before prefix_len, it is part of prefix.
-                            
-                            // Actually, let's keep it simple: Highlighting overrides everything.
-                            // For non-highlighted parts, we check if they belong to prefix.
-                            
-                            // Check if this span is fully inside prefix
-                            // It's easier to just push spans and let them handle their own style?
-                            // No, span style is fixed.
-                            
-                            spans.push(Span::raw(pre_match.to_string()));
+                // Highlighting logic
+                if let Some(query) = &app.search_query {
+                    if !query.is_empty() && trimmed.contains(query) {
+                        let mut spans = Vec::new();
+                        let highlight_style = Style::default().fg(Color::Black).bg(Color::Yellow);
+                        let mut last_idx = 0;
+
+                        for (idx, match_str) in trimmed.match_indices(query) {
+                            if idx > last_idx {
+                                let pre_match = &trimmed[last_idx..idx];
+                                // Apply prefix style if this part overlaps with prefix
+                                // This is complex because prefix is also styled.
+                                // Simplification: Apply standard prefix styling logic to the whole chunk,
+                                // but that's hard if chunk is split.
+                                // Better approach: Re-construct spans from the highlighted chunks.
+
+                                // To handle prefix styling correctly with arbitrary highlighting is complex.
+                                // We will prioritize highlighting.
+                                // But we should try to keep prefix color if possible.
+
+                                // Let's iterate chars or use a simpler heuristic.
+                                // If the chunk starts before prefix_len, it is part of prefix.
+
+                                // Actually, let's keep it simple: Highlighting overrides everything.
+                                // For non-highlighted parts, we check if they belong to prefix.
+
+                                // Check if this span is fully inside prefix
+                                // It's easier to just push spans and let them handle their own style?
+                                // No, span style is fixed.
+
+                                spans.push(Span::raw(pre_match.to_string()));
+                            }
+                            spans.push(Span::styled(match_str.to_string(), highlight_style));
+                            last_idx = idx + match_str.len();
                         }
-                        spans.push(Span::styled(match_str.to_string(), highlight_style));
-                        last_idx = idx + match_str.len();
-                    }
-                    if last_idx < trimmed.len() {
-                        spans.push(Span::raw(trimmed[last_idx..].to_string()));
-                    }
-                    
-                    // Now fix styles for non-highlighted parts
-                    // This is a post-processing step on spans? 
-                    // Or we just accept that searching breaks standard coloring for that line.
-                    // Let's try to restore prefix color.
-                    // This is getting complicated for a "quick" fix.
-                    // The simplest "good enough" is: Highlight matches, everything else is raw/default.
-                    // The prefix color is nice though.
-                    
-                    // Let's do this: Iterate the spans we just made.
-                    // For each raw span, if it overlaps with the prefix range (0..prefix_len), style that intersection.
-                    // Since `trimmed` includes prefix.
-                    
-                    let mut styled_spans = Vec::new();
-                    let mut current_pos = 0;
-                    let prefix_width = current_prefix.chars().count(); // approximation
-                    
-                    for span in spans {
-                        let content = span.content.clone();
-                        let len = content.chars().count();
-                        if span.style == highlight_style {
-                            styled_spans.push(span);
-                        } else {
-                            // This is a non-match span. Check overlap with prefix.
-                            let end_pos = current_pos + len;
-                            if current_pos < prefix_width {
-                                // Simple heuristic: if it ends within or at prefix width, style as prefix.
-                                if end_pos <= prefix_width {
-                                    styled_spans.push(Span::styled(content, name_style));
-                                } else if current_pos >= prefix_width {
-                                    styled_spans.push(Span::raw(content));
+                        if last_idx < trimmed.len() {
+                            spans.push(Span::raw(trimmed[last_idx..].to_string()));
+                        }
+
+                        // Now fix styles for non-highlighted parts
+                        // This is a post-processing step on spans?
+                        // Or we just accept that searching breaks standard coloring for that line.
+                        // Let's try to restore prefix color.
+                        // This is getting complicated for a "quick" fix.
+                        // The simplest "good enough" is: Highlight matches, everything else is raw/default.
+                        // The prefix color is nice though.
+
+                        // Let's do this: Iterate the spans we just made.
+                        // For each raw span, if it overlaps with the prefix range (0..prefix_len), style that intersection.
+                        // Since `trimmed` includes prefix.
+
+                        let mut styled_spans = Vec::new();
+                        let mut current_pos = 0;
+                        let prefix_width = current_prefix.chars().count(); // approximation
+
+                        for span in spans {
+                            let content = span.content.clone();
+                            let len = content.chars().count();
+                            if span.style == highlight_style {
+                                styled_spans.push(span);
+                            } else {
+                                // This is a non-match span. Check overlap with prefix.
+                                let end_pos = current_pos + len;
+                                if current_pos < prefix_width {
+                                    // Simple heuristic: if it ends within or at prefix width, style as prefix.
+                                    if end_pos <= prefix_width {
+                                        styled_spans.push(Span::styled(content, name_style));
+                                    } else if current_pos >= prefix_width {
+                                        styled_spans.push(Span::raw(content));
+                                    } else {
+                                        // Overlaps boundary. Use raw to avoid complexity.
+                                        styled_spans.push(Span::raw(content));
+                                    }
                                 } else {
-                                    // Overlaps boundary. Use raw to avoid complexity.
                                     styled_spans.push(Span::raw(content));
                                 }
-                            } else {
-                                styled_spans.push(Span::raw(content));
                             }
+                            current_pos += len;
                         }
-                        current_pos += len;
+                        return Line::from(styled_spans);
                     }
-                    return Line::from(styled_spans);
                 }
-            }
 
-            if trimmed.starts_with(current_prefix) {
-                let rest = trimmed.strip_prefix(current_prefix).unwrap_or("").to_string();
-                Line::from(vec![
-                    Span::styled(current_prefix.to_string(), name_style),
-                    Span::raw(rest),
-                ])
-            } else {
-                Line::from(Span::raw(trimmed))
-            }
-        }).collect()
+                if trimmed.starts_with(current_prefix) {
+                    let rest = trimmed
+                        .strip_prefix(current_prefix)
+                        .unwrap_or("")
+                        .to_string();
+                    Line::from(vec![
+                        Span::styled(current_prefix.to_string(), name_style),
+                        Span::raw(rest),
+                    ])
+                } else {
+                    Line::from(Span::raw(trimmed))
+                }
+            })
+            .collect();
+        (lines, raw_lines)
     };
 
     let mut lines = Vec::new();
     let mut total_filtered = 0;
+    let mut raw_lines = Vec::new();
 
     if app.timeline_view {
         let _total = app.timeline.len();
         // For timeline, iterating everything might be slow if huge buffer.
         // But for <50k lines it's usually instant in Rust.
         // We collect all matching lines to calculate scroll.
-        
+
         // Optimization: if no filter and not json, keep old logic?
         // Let's rely on speed for now.
-        
+
         // We need to support scrolling.
         // It's hard to map 'scroll' index to filtered index efficiently without caching.
         // Simple approach: Collect ALL matching display lines, then slice.
-        
+
         let mut all_lines = Vec::new();
         for entry in app.timeline.iter() {
-             let (name, color) = app.processes.get(entry.process_id)
+            let (name, color) = app
+                .processes
+                .get(entry.process_id)
                 .map(|p| (p.spec.name.as_str(), p.spec.color.as_deref()))
                 .unwrap_or(("process", None));
-             all_lines.extend(process_line(&entry.text, name, color));
+            let (rendered, raw) = process_line(&entry.text, name, color);
+            all_lines.extend(rendered);
+            raw_lines.extend(raw);
         }
         total_filtered = all_lines.len();
-        
+
         let start = if app.timeline_follow {
             total_filtered.saturating_sub(height)
         } else {
-            app.timeline_scroll.min(total_filtered.saturating_sub(height))
+            app.timeline_scroll
+                .min(total_filtered.saturating_sub(height))
         };
         let end = (start + height).min(total_filtered);
         lines = all_lines[start..end].to_vec();
-
+        raw_lines = raw_lines[start..end].to_vec();
     } else if let Some(process) = app.selected_process() {
         let mut all_lines = Vec::new();
+        let mut all_raw = Vec::new();
         let name = process.spec.name.as_str();
         let color = process.spec.color.as_deref();
-        
+
         for entry in process.logs.iter() {
             // Strip existing prefix if present in raw log to avoid double prefixing?
             // The original logic stripped it.
             let text = strip_existing_prefix(name, &entry.text);
-            all_lines.extend(process_line(&text, name, color));
+            let (rendered, raw) = process_line(&text, name, color);
+            all_lines.extend(rendered);
+            all_raw.extend(raw);
         }
         total_filtered = all_lines.len();
 
@@ -505,9 +555,19 @@ fn render_log_lines(app: &App, height: usize, width: usize) -> (Text<'static>, u
         };
         let end = (start + height).min(total_filtered);
         lines = all_lines[start..end].to_vec();
+        raw_lines = all_raw[start..end].to_vec();
     }
 
-    (Text::from(lines), total_filtered)
+    if let Some((start, end)) = app.selection_range_for(raw_lines.len()) {
+        let selection_style = Style::default().bg(Color::DarkGray);
+        for (idx, line) in lines.iter_mut().enumerate() {
+            if idx >= start && idx <= end {
+                line.style = line.style.patch(selection_style);
+            }
+        }
+    }
+
+    (Text::from(lines), total_filtered, raw_lines)
 }
 
 fn list_state(selected: usize, len: usize) -> ratatui::widgets::ListState {

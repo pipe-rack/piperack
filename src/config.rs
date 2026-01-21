@@ -38,6 +38,10 @@ pub struct Config {
     pub restart_tries: Option<u32>,
     /// Delay in milliseconds before restarting a process.
     pub restart_delay_ms: Option<u64>,
+    /// Time to wait after sending SIGINT before escalating (ms).
+    pub shutdown_sigint_ms: Option<u64>,
+    /// Time to wait after sending SIGTERM before force-killing (ms).
+    pub shutdown_sigterm_ms: Option<u64>,
     /// Whether to handle stdin input (default: true).
     pub handle_input: Option<bool>,
     /// Template for log file paths.
@@ -123,6 +127,8 @@ kill_others = true
 kill_others_on_fail = false
 restart_tries = 3
 restart_delay_ms = 250
+shutdown_sigint_ms = 800
+shutdown_sigterm_ms = 800
 handle_input = true
 log_file = "logs/{name}.log"
 
@@ -155,6 +161,8 @@ cmd = "pnpm dev"
         assert_eq!(config.kill_others_on_fail, Some(false));
         assert_eq!(config.restart_tries, Some(3));
         assert_eq!(config.restart_delay_ms, Some(250));
+        assert_eq!(config.shutdown_sigint_ms, Some(800));
+        assert_eq!(config.shutdown_sigterm_ms, Some(800));
         assert_eq!(config.handle_input, Some(true));
         assert_eq!(config.log_file.as_deref(), Some("logs/{name}.log"));
         assert_eq!(config.processes.len(), 2);

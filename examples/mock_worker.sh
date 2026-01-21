@@ -19,6 +19,21 @@ log() {
     fi
 }
 
+shutting_down=0
+
+shutdown() {
+    if [ "$shutting_down" -eq 1 ]; then
+        return
+    fi
+    shutting_down=1
+    log "info" "shutdown signal received, draining for 6s"
+    sleep 6
+    log "info" "shutdown complete"
+    exit 0
+}
+
+trap shutdown INT TERM
+
 log "info" "starting worker pool"
 log "info" "polling queue=default"
 sleep 2

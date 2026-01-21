@@ -142,9 +142,18 @@ mod tests {
     #[test]
     fn log_buffer_drops_oldest() {
         let mut buffer = LogBuffer::new(2);
-        buffer.push(LogLine { text: "a".into(), stream: StreamKind::Stdout });
-        buffer.push(LogLine { text: "b".into(), stream: StreamKind::Stdout });
-        let dropped = buffer.push(LogLine { text: "c".into(), stream: StreamKind::Stdout });
+        buffer.push(LogLine {
+            text: "a".into(),
+            stream: StreamKind::Stdout,
+        });
+        buffer.push(LogLine {
+            text: "b".into(),
+            stream: StreamKind::Stdout,
+        });
+        let dropped = buffer.push(LogLine {
+            text: "c".into(),
+            stream: StreamKind::Stdout,
+        });
         assert!(dropped);
         let lines = buffer.iter().map(|l| l.text.clone()).collect::<Vec<_>>();
         assert_eq!(lines, vec!["b", "c"]);
@@ -153,8 +162,14 @@ mod tests {
     #[test]
     fn timeline_buffer_drops_oldest() {
         let mut buffer = TimelineBuffer::new(1);
-        buffer.push(TimelineEntry { text: "x".into(), process_id: 0 });
-        let dropped = buffer.push(TimelineEntry { text: "y".into(), process_id: 1 });
+        buffer.push(TimelineEntry {
+            text: "x".into(),
+            process_id: 0,
+        });
+        let dropped = buffer.push(TimelineEntry {
+            text: "y".into(),
+            process_id: 1,
+        });
         assert!(dropped);
         assert_eq!(buffer.len(), 1);
         assert_eq!(buffer.iter().next().unwrap().text, "y");
