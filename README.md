@@ -50,6 +50,7 @@ piperack --config examples/full_stack.toml
 - [Usage](docs/usage.md)
 - [Configuration](docs/configuration.md)
 - [Architecture](docs/architecture.md)
+- [Testing](docs/testing.md)
 
 ## Configuration
 

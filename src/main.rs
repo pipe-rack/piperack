@@ -1643,4 +1643,104 @@ mod tests {
         assert_eq!(specs[0].cmd, "cargo");
         assert_eq!(specs[0].args, vec!["run"]);
     }
+
+    #[test]
+    fn parse_output_mode_and_success_policy() {
+        assert!(matches!(parse_output_mode("combined").unwrap(), OutputMode::Combined));
+        assert!(matches!(parse_output_mode("grouped").unwrap(), OutputMode::Grouped));
+        assert!(matches!(parse_output_mode("raw").unwrap(), OutputMode::Raw));
+        assert!(parse_output_mode("nope").is_err());
+
+        assert!(matches!(parse_success_policy("first").unwrap(), SuccessPolicy::First));
+        assert!(matches!(parse_success_policy("last").unwrap(), SuccessPolicy::Last));
+        assert!(matches!(parse_success_policy("all").unwrap(), SuccessPolicy::All));
+        assert!(parse_success_policy("nope").is_err());
+    }
+
+    #[test]
+    fn split_env_parses_key_value() {
+        let (k, v) = split_env("A=1").unwrap();
+        assert_eq!(k, "A");
+        assert_eq!(v, "1");
+        assert!(split_env("A").is_err());
+    }
+
+    #[test]
+    fn render_template_and_prefix_length() {
+        let rendered = render_template("[{name}-{index}-{time}]", "api", 2, "1s");
+        assert_eq!(rendered, "[api-2-1s]");
+        assert_eq!(apply_prefix_length("abc".to_string(), Some(2)), "ab");
+        assert_eq!(apply_prefix_length("abc".to_string(), Some(5)), "abc  ");
+    }
+
+    #[test]
+    fn format_tool_message_respects_symbols() {
+        assert_eq!(format_tool_message("hi", true), "◆ piperack: hi");
+        assert_eq!(format_tool_message("hi", false), "[piperack] hi");
+    }
+
+    #[test]
+    fn backoff_delay_respects_override() {
+        let settings = RunSettings {
+            max_lines: 100,
+            use_symbols: false,
+            no_ui: true,
+            raw: true,
+            prefix: None,
+            prefix_length: None,
+            prefix_colors: false,
+            timestamp: false,
+            output_mode: OutputMode::Combined,
+            success: SuccessPolicy::Last,
+            kill_others: false,
+            kill_others_on_fail: false,
+            restart_tries: None,
+            restart_delay_ms: Some(250),
+            shutdown_sigint_ms: 800,
+            shutdown_sigterm_ms: 800,
+            input_enabled: false,
+            log_file: None,
+        };
+        assert_eq!(backoff_delay(1, &settings), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn format_command_joins_args() {
+        let spec = ProcessSpec {
+            name: "api".to_string(),
+            cmd: "cargo".to_string(),
+            args: vec!["run".to_string(), "--".to_string(), "help".to_string()],
+            cwd: None,
+            color: None,
+            env: HashMap::new(),
+            restart_on_fail: false,
+            follow: true,
+            pre_cmd: None,
+            watch_paths: Vec::new(),
+            watch_ignore: Vec::new(),
+            watch_ignore_gitignore: false,
+            watch_debounce_ms: 200,
+            depends_on: Vec::new(),
+            ready_check: None,
+            tags: Vec::new(),
+        };
+        assert_eq!(format_command(&spec), "cargo run -- help");
+    }
+
+    #[test]
+    fn apply_color_wraps_when_known() {
+        let colored = apply_color("[api]", Some("red"));
+        assert!(colored.contains("[api]"));
+        assert!(colored.contains("\u{1b}["));
+        assert_eq!(apply_color("[api]", None), "[api]");
+    }
+
+    #[test]
+    fn strip_existing_prefix_matches_known_formats() {
+        assert_eq!(strip_existing_prefix("api", "[api] hello"), "hello");
+        assert_eq!(strip_existing_prefix("api", "api \u{203a} hello"), "hello");
+        assert_eq!(strip_existing_prefix("api", "api: hello"), "hello");
+        assert_eq!(strip_existing_prefix("api", "api - hello"), "hello");
+        assert_eq!(strip_existing_prefix("api", "hello"), "hello");
+    }
 }
