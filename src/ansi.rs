@@ -290,3 +290,63 @@ fn basic_color(index: i32, bright: bool) -> Option<Color> {
     };
     Some(color)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ansi_spans_plain_text() {
+        let spans = ansi_spans("hello");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "hello");
+        assert_eq!(spans[0].style.fg, None);
+    }
+
+    #[test]
+    fn ansi_spans_respects_sgr_color() {
+        let spans = ansi_spans("\u{1b}[31mred\u{1b}[0m");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "red");
+        assert_eq!(spans[0].style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn ansi_spans_skips_osc_sequences() {
+        let spans = ansi_spans("hi\u{1b}]0;title\u{7}there");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "hithere");
+    }
+
+    #[test]
+    fn ansi_spans_handles_carriage_return() {
+        let spans = ansi_spans("abc\rdef");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "def");
+    }
+
+    #[test]
+    fn parse_params_defaults_to_reset() {
+        assert_eq!(parse_params(""), vec![0]);
+        assert_eq!(parse_params(";"), vec![0, 0]);
+        assert_eq!(parse_params("1;"), vec![1, 0]);
+    }
+
+    #[test]
+    fn parse_extended_color_handles_index_and_rgb() {
+        let indexed = parse_extended_color(&[5, 120]).unwrap();
+        assert_eq!(indexed.0, 2);
+        assert_eq!(indexed.1, Color::Indexed(120));
+
+        let rgb = parse_extended_color(&[2, 1, 2, 3]).unwrap();
+        assert_eq!(rgb.0, 4);
+        assert_eq!(rgb.1, Color::Rgb(1, 2, 3));
+
+        assert!(parse_extended_color(&[9]).is_none());
+    }
+
+    #[test]
+    fn basic_color_rejects_out_of_range() {
+        assert!(basic_color(9, false).is_none());
+    }
+}

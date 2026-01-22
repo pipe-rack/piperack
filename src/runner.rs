@@ -731,6 +731,97 @@ async fn wait_for_exit(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_stage_prefers_sigint_then_sigterm() {
+        let shutdown = ShutdownConfig::new(800, 500);
+        let now = tokio::time::Instant::now();
+        let (stage, signal, deadline) =
+            ProcessManager::initial_shutdown_stage(shutdown, ProcessSignal::SigInt, now);
+        assert!(matches!(stage, ShutdownStage::SigInt));
+        assert_eq!(signal, Some(ProcessSignal::SigInt));
+        assert_eq!(deadline, now + Duration::from_millis(800));
+    }
+
+    #[test]
+    fn shutdown_stage_falls_back_when_sigint_disabled() {
+        let shutdown = ShutdownConfig::new(0, 500);
+        let now = tokio::time::Instant::now();
+        let (stage, signal, deadline) =
+            ProcessManager::initial_shutdown_stage(shutdown, ProcessSignal::SigInt, now);
+        assert!(matches!(stage, ShutdownStage::SigTerm));
+        assert_eq!(signal, Some(ProcessSignal::SigTerm));
+        assert_eq!(deadline, now + Duration::from_millis(500));
+    }
+
+    #[test]
+    fn shutdown_stage_handles_all_disabled() {
+        let shutdown = ShutdownConfig::new(0, 0);
+        let now = tokio::time::Instant::now();
+        let (stage, signal, deadline) =
+            ProcessManager::initial_shutdown_stage(shutdown, ProcessSignal::SigTerm, now);
+        assert!(matches!(stage, ShutdownStage::Kill));
+        assert_eq!(signal, None);
+        assert_eq!(deadline, now);
+    }
+
+    #[test]
+    fn shutdown_config_flags() {
+        let config = ShutdownConfig::new(100, 0);
+        assert!(config.sigint_enabled());
+        assert!(!config.sigterm_enabled());
+        assert_eq!(config.sigint_timeout(), Duration::from_millis(100));
+        assert_eq!(config.sigterm_timeout(), Duration::from_millis(0));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn poll_shutdowns_advances_stage() {
+        let spec = ProcessSpec {
+            name: "sleep".to_string(),
+            cmd: "sleep".to_string(),
+            args: vec!["5".to_string()],
+            cwd: None,
+            color: None,
+            env: std::collections::HashMap::new(),
+            restart_on_fail: false,
+            follow: true,
+            pre_cmd: None,
+            watch_paths: Vec::new(),
+            watch_ignore: Vec::new(),
+            watch_ignore_gitignore: false,
+            watch_debounce_ms: 200,
+            depends_on: Vec::new(),
+            ready_check: None,
+            tags: Vec::new(),
+        };
+        let (tx, _rx) = mpsc::channel(4);
+        let shutdown = ShutdownConfig::new(10, 1000);
+        let mut manager = ProcessManager::new(vec![spec], tx, shutdown);
+        let child = tokio::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        manager.processes[0].child = Some(child);
+        manager.processes[0].shutdown = Some(ShutdownState {
+            stage: ShutdownStage::SigInt,
+            deadline: tokio::time::Instant::now() - Duration::from_millis(1),
+        });
+
+        manager.poll_shutdowns().await;
+        let stage = manager.processes[0].shutdown.unwrap().stage;
+        assert!(matches!(stage, ShutdownStage::SigTerm | ShutdownStage::Kill));
+
+        if let Some(mut child) = manager.processes[0].child.take() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+    }
+}
+
 async fn read_stream<R>(
     id: usize,
     stream: StreamKind,

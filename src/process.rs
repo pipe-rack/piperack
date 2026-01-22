@@ -104,3 +104,37 @@ impl ProcessState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_state_inherits_follow_and_defaults() {
+        let spec = ProcessSpec {
+            name: "api".to_string(),
+            cmd: "echo".to_string(),
+            args: Vec::new(),
+            cwd: None,
+            color: None,
+            env: HashMap::new(),
+            restart_on_fail: false,
+            follow: true,
+            pre_cmd: None,
+            watch_paths: Vec::new(),
+            watch_ignore: Vec::new(),
+            watch_ignore_gitignore: false,
+            watch_debounce_ms: 200,
+            depends_on: Vec::new(),
+            ready_check: None,
+            tags: Vec::new(),
+        };
+        let state = ProcessState::new(spec, 10);
+        assert_eq!(state.status, ProcessStatus::Idle);
+        assert!(state.follow);
+        assert_eq!(state.scroll, 0);
+        assert!(!state.ready);
+        assert!(state.pid.is_none());
+        assert!(state.started_at.is_none());
+    }
+}

@@ -9,7 +9,7 @@ use crossterm::event::{KeyEvent, MouseEvent};
 use crate::output::StreamKind;
 
 /// Signals used for graceful process shutdown.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessSignal {
     SigInt,
     SigTerm,
@@ -59,4 +59,15 @@ pub enum Event {
     Mouse(MouseEvent),
     /// The terminal window was resized.
     Resize { width: u16, height: u16 },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProcessSignal;
+
+    #[test]
+    fn process_signal_labels() {
+        assert_eq!(ProcessSignal::SigInt.label(), "SIGINT");
+        assert_eq!(ProcessSignal::SigTerm.label(), "SIGTERM");
+    }
 }

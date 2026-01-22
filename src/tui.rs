@@ -709,3 +709,59 @@ fn truncate_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
 fn strip_carriage(text: &str) -> String {
     text.rsplit('\r').next().unwrap_or("").to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_existing_prefix_removes_known_prefixes() {
+        assert_eq!(strip_existing_prefix("api", "[api] hello"), "hello");
+        assert_eq!(strip_existing_prefix("api", "api: hello"), "hello");
+        assert_eq!(strip_existing_prefix("api", "api - hello"), "hello");
+        assert_eq!(strip_existing_prefix("api", "nope"), "nope");
+    }
+
+    #[test]
+    fn truncate_shortens_and_marks() {
+        assert_eq!(truncate("abcdef", 4), "abc~");
+        assert_eq!(truncate("abc", 4), "abc");
+        assert_eq!(truncate("abc", 0), "");
+    }
+
+    #[test]
+    fn truncate_spans_limits_total_width() {
+        let spans = vec![
+            Span::raw("abc"),
+            Span::raw("def"),
+        ];
+        let truncated = truncate_spans(spans, 4);
+        let text = truncated.iter().map(|s| s.content.to_string()).collect::<String>();
+        assert!(text.ends_with("~"));
+        assert!(text.len() <= 5);
+    }
+
+    #[test]
+    fn truncate_spans_zero_max_returns_empty() {
+        let spans = vec![Span::raw("abc")];
+        let truncated = truncate_spans(spans, 0);
+        assert!(truncated.is_empty());
+    }
+
+    #[test]
+    fn status_style_reflects_state() {
+        assert_eq!(status_style(&ProcessStatus::Idle).fg, Some(Color::DarkGray));
+        assert_eq!(status_style(&ProcessStatus::Running).fg, Some(Color::Green));
+        assert_eq!(status_style(&ProcessStatus::Starting).fg, Some(Color::Yellow));
+        assert_eq!(
+            status_style(&ProcessStatus::Exited { code: Some(1) }).fg,
+            Some(Color::Red)
+        );
+    }
+
+    #[test]
+    fn strip_carriage_keeps_last_segment() {
+        assert_eq!(strip_carriage("abc\rdef"), "def");
+        assert_eq!(strip_carriage("abc"), "abc");
+    }
+}

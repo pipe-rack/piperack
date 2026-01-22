@@ -206,3 +206,38 @@ fn build_gitignore(base: &Path) -> Result<Gitignore> {
     }
     Ok(builder.build()?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_watch_paths_handles_absolute_and_relative() {
+        let base = Path::new("/tmp/piperack-tests");
+        let paths = vec!["src".to_string(), "/var/log".to_string()];
+        let resolved = resolve_watch_paths(base, &paths);
+        assert_eq!(resolved[0], base.join("src"));
+        assert_eq!(resolved[1], PathBuf::from("/var/log"));
+    }
+
+    #[test]
+    fn expand_pattern_adds_recursive_glob_for_dirs() {
+        let patterns = expand_pattern("src");
+        assert_eq!(patterns, vec!["src".to_string(), "src/**".to_string()]);
+
+        let trimmed = expand_pattern("src/");
+        assert_eq!(trimmed, vec!["src".to_string(), "src/**".to_string()]);
+
+        let globbed = expand_pattern("*.rs");
+        assert_eq!(globbed, vec!["*.rs".to_string()]);
+    }
+
+    #[test]
+    fn ignore_matcher_respects_globs() {
+        let base = Path::new("/tmp/piperack-tests");
+        let matcher = IgnoreMatcher::new(base, &vec!["target".to_string()], true).unwrap();
+        assert!(matcher.is_ignored(&base.join("target")));
+        assert!(matcher.is_ignored(&PathBuf::from("target")));
+        assert!(!matcher.is_ignored(&base.join("src")));
+    }
+}

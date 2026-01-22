@@ -174,4 +174,19 @@ mod tests {
         assert_eq!(buffer.len(), 1);
         assert_eq!(buffer.iter().next().unwrap().text, "y");
     }
+
+    #[test]
+    fn sanitize_text_strips_ansi() {
+        let raw = "\u{1b}[31mred\u{1b}[0m";
+        assert_eq!(sanitize_text(raw, true), "red");
+        assert_eq!(sanitize_text(raw, false), raw);
+    }
+
+    #[test]
+    fn format_json_pretty_prints_valid_input() {
+        let pretty = format_json("{\"a\":1}");
+        assert!(pretty.contains("\n"));
+        assert!(pretty.contains("\"a\": 1"));
+        assert_eq!(format_json("not json"), "not json");
+    }
 }

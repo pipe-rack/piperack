@@ -1039,6 +1039,122 @@ fn strip_carriage(text: &str) -> String {
     text.rsplit('\r').next().unwrap_or("").to_string()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use crate::output::LogLine;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    fn make_spec(name: &str) -> ProcessSpec {
+        ProcessSpec {
+            name: name.to_string(),
+            cmd: "echo".to_string(),
+            args: Vec::new(),
+            cwd: None,
+            color: None,
+            env: HashMap::new(),
+            restart_on_fail: false,
+            follow: true,
+            pre_cmd: None,
+            watch_paths: Vec::new(),
+            watch_ignore: Vec::new(),
+            watch_ignore_gitignore: false,
+            watch_debounce_ms: 200,
+            depends_on: Vec::new(),
+            ready_check: None,
+            tags: Vec::new(),
+        }
+    }
+
+    fn make_app() -> App {
+        App::new(vec![make_spec("api")], 100, false, true)
+    }
+
+    #[test]
+    fn selection_range_normalizes_and_clamps() {
+        let mut app = make_app();
+        app.selection_scope = Some(SelectionScope::Process(0));
+        app.selection_start = Some(3);
+        app.selection_end = Some(1);
+        let range = app.selection_range_for(2).unwrap();
+        assert_eq!(range, (1, 1));
+    }
+
+    #[test]
+    fn selection_text_joins_visible_lines() {
+        let mut app = make_app();
+        app.selection_scope = Some(SelectionScope::Process(0));
+        app.selection_start = Some(0);
+        app.selection_end = Some(1);
+        app.visible_raw_lines = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(app.selection_text().unwrap(), "a\nb");
+    }
+
+    #[test]
+    fn selected_process_raw_text_strips_ansi_and_skips_pretty() {
+        let mut app = make_app();
+        if let Some(process) = app.processes.get_mut(0) {
+            process.logs.push(LogLine {
+                text: "\u{1b}[31mred\u{1b}[0m".to_string(),
+                stream: StreamKind::Stdout,
+            });
+            process.logs.push(LogLine {
+                text: "{\"a\":1}".to_string(),
+                stream: StreamKind::Stdout,
+            });
+        }
+        app.json_formatting = true;
+        assert_eq!(app.selected_process_raw_text().unwrap(), "red\n{\"a\":1}");
+    }
+
+    #[test]
+    fn mouse_selection_freezes_follow() {
+        let mut app = make_app();
+        app.set_log_viewport(LogViewport {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        });
+        app.process_list_width = 0;
+        app.processes[0].follow = true;
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(mouse);
+        assert!(!app.processes[0].follow);
+        assert!(app.selection_active);
+    }
+
+    #[test]
+    fn selection_scope_mismatch_returns_none() {
+        let mut app = make_app();
+        app.selection_scope = Some(SelectionScope::Process(0));
+        app.selection_start = Some(0);
+        app.selection_end = Some(1);
+        app.timeline_view = true;
+        assert!(app.selection_range().is_none());
+    }
+
+    #[test]
+    fn clear_selection_resets_state() {
+        let mut app = make_app();
+        app.selection_scope = Some(SelectionScope::Process(0));
+        app.selection_start = Some(0);
+        app.selection_end = Some(1);
+        app.selection_active = true;
+        app.clear_selection();
+        assert!(app.selection_scope.is_none());
+        assert!(app.selection_start.is_none());
+        assert!(app.selection_end.is_none());
+        assert!(!app.selection_active);
+    }
+}
+
 fn format_duration(duration: Duration) -> String {
     let secs = duration.as_secs();
     let minutes = secs / 60;
