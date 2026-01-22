@@ -2,7 +2,7 @@
 *.md
 !README.md
 !CONTRIBUTION.md
-
+!/docs/**/*.md
 # Rust build output
 target/
 
