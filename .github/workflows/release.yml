@@ -78,6 +78,7 @@ jobs:
         with:
           files: release/*
           overwrite_files: true
+          generate_release_notes: true
           token: ${{ secrets.RELEASE_TOKEN || github.token }}
 
   update-homebrew-tap:
