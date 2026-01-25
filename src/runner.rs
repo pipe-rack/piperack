@@ -23,7 +23,9 @@ use crate::process::ProcessSpec;
 pub struct ProcessManager {
     processes: Vec<ManagedProcess>,
     event_tx: mpsc::Sender<Event>,
+    output_tx: mpsc::Sender<Event>,
     shutdown: ShutdownConfig,
+    lossy_output: bool,
 }
 
 struct ManagedProcess {
@@ -85,7 +87,9 @@ impl ProcessManager {
     pub fn new(
         specs: Vec<ProcessSpec>,
         event_tx: mpsc::Sender<Event>,
+        output_tx: mpsc::Sender<Event>,
         shutdown: ShutdownConfig,
+        lossy_output: bool,
     ) -> Self {
         let processes = specs
             .into_iter()
@@ -102,7 +106,9 @@ impl ProcessManager {
         Self {
             processes,
             event_tx,
+            output_tx,
             shutdown,
+            lossy_output,
         }
     }
 
@@ -231,14 +237,30 @@ impl ProcessManager {
         };
 
         if let Some(stdout) = child.stdout.take() {
-            let tx = self.event_tx.clone();
+            let tx = self.output_tx.clone();
             let regex = log_ready_regex.clone();
-            tokio::spawn(read_stream(id, StreamKind::Stdout, stdout, tx, regex));
+            let lossy_output = self.lossy_output;
+            tokio::spawn(read_stream(
+                id,
+                StreamKind::Stdout,
+                stdout,
+                tx,
+                regex,
+                lossy_output,
+            ));
         }
         if let Some(stderr) = child.stderr.take() {
-            let tx = self.event_tx.clone();
+            let tx = self.output_tx.clone();
             let regex = log_ready_regex; // move last clone
-            tokio::spawn(read_stream(id, StreamKind::Stderr, stderr, tx, regex));
+            let lossy_output = self.lossy_output;
+            tokio::spawn(read_stream(
+                id,
+                StreamKind::Stderr,
+                stderr,
+                tx,
+                regex,
+                lossy_output,
+            ));
         }
 
         if let Some(process) = self.processes.get_mut(id) {
@@ -311,23 +333,25 @@ impl ProcessManager {
             }
         };
         if let Some(stdout) = child.stdout.take() {
-            let tx = self.event_tx.clone();
+            let tx = self.output_tx.clone();
             tokio::spawn(read_stream_with_prefix(
                 id,
                 StreamKind::Stdout,
                 "[pre] ",
                 stdout,
                 tx,
+                self.lossy_output,
             ));
         }
         if let Some(stderr) = child.stderr.take() {
-            let tx = self.event_tx.clone();
+            let tx = self.output_tx.clone();
             tokio::spawn(read_stream_with_prefix(
                 id,
                 StreamKind::Stderr,
                 "[pre] ",
                 stderr,
                 tx,
+                self.lossy_output,
             ));
         }
         let status = child.wait().await?;
@@ -800,7 +824,8 @@ mod tests {
         };
         let (tx, _rx) = mpsc::channel(4);
         let shutdown = ShutdownConfig::new(10, 1000);
-        let mut manager = ProcessManager::new(vec![spec], tx, shutdown);
+        let (output_tx, _output_rx) = mpsc::channel(4);
+        let mut manager = ProcessManager::new(vec![spec], tx, output_tx, shutdown, false);
         let child = tokio::process::Command::new("sleep")
             .arg("5")
             .spawn()
@@ -828,11 +853,13 @@ async fn read_stream<R>(
     reader: R,
     tx: mpsc::Sender<Event>,
     readiness_regex: Option<Regex>,
+    lossy_output: bool,
 ) where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut lines = BufReader::new(reader).lines();
     let mut matched = false;
+    let mut dropped: u64 = 0;
     while let Ok(Some(line)) = lines.next_line().await {
         if !matched {
             if let Some(regex) = &readiness_regex {
@@ -842,7 +869,39 @@ async fn read_stream<R>(
                 }
             }
         }
-        let _ = tx.send(Event::ProcessOutput { id, line, stream }).await;
+        if lossy_output {
+            if dropped > 0 {
+                if tx
+                    .try_send(Event::ProcessOutput {
+                        id,
+                        line: format!("[piperack] dropped {} lines (output overflow)", dropped),
+                        stream: StreamKind::Stderr,
+                    })
+                    .is_ok()
+                {
+                    dropped = 0;
+                }
+            }
+            match tx.try_send(Event::ProcessOutput { id, line, stream }) {
+                Ok(_) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    dropped = dropped.saturating_add(1);
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => break,
+            }
+        } else {
+            let _ = tx.send(Event::ProcessOutput { id, line, stream }).await;
+        }
+    }
+
+    if lossy_output && dropped > 0 {
+        let _ = tx
+            .send(Event::ProcessOutput {
+                id,
+                line: format!("[piperack] dropped {} lines (output overflow)", dropped),
+                stream: StreamKind::Stderr,
+            })
+            .await;
     }
 }
 
@@ -853,16 +912,45 @@ async fn read_stream_with_prefix<R>(
     prefix: &str,
     reader: R,
     tx: mpsc::Sender<Event>,
+    lossy_output: bool,
 ) where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut lines = BufReader::new(reader).lines();
+    let mut dropped: u64 = 0;
     while let Ok(Some(line)) = lines.next_line().await {
+        let line = format!("{}{}", prefix, line);
+        if lossy_output {
+            if dropped > 0 {
+                if tx
+                    .try_send(Event::ProcessOutput {
+                        id,
+                        line: format!("[piperack] dropped {} lines (output overflow)", dropped),
+                        stream: StreamKind::Stderr,
+                    })
+                    .is_ok()
+                {
+                    dropped = 0;
+                }
+            }
+            match tx.try_send(Event::ProcessOutput { id, line, stream }) {
+                Ok(_) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    dropped = dropped.saturating_add(1);
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => break,
+            }
+        } else {
+            let _ = tx.send(Event::ProcessOutput { id, line, stream }).await;
+        }
+    }
+
+    if lossy_output && dropped > 0 {
         let _ = tx
             .send(Event::ProcessOutput {
                 id,
-                line: format!("{}{}", prefix, line),
-                stream,
+                line: format!("[piperack] dropped {} lines (output overflow)", dropped),
+                stream: StreamKind::Stderr,
             })
             .await;
     }

@@ -176,8 +176,15 @@ async fn main() -> Result<()> {
     }
 
     let (event_tx, mut event_rx) = mpsc::channel(256);
+    let (output_tx, mut output_rx) = mpsc::channel(256);
     let shutdown = ShutdownConfig::new(settings.shutdown_sigint_ms, settings.shutdown_sigterm_ms);
-    let mut manager = ProcessManager::new(specs.clone(), event_tx.clone(), shutdown);
+    let mut manager = ProcessManager::new(
+        specs.clone(),
+        event_tx.clone(),
+        output_tx.clone(),
+        shutdown,
+        !settings.no_ui,
+    );
     let mut app = App::new(
         specs,
         settings.max_lines,
@@ -194,6 +201,8 @@ async fn main() -> Result<()> {
         Some(tui::init_terminal()?)
     };
     let tick_rate = Duration::from_millis(150);
+    let draw_interval = Duration::from_millis(33);
+    let mut last_draw = Instant::now() - draw_interval;
 
     if !settings.no_ui {
         spawn_input_listener(event_tx.clone());
@@ -215,301 +224,10 @@ async fn main() -> Result<()> {
     let mut last_signal_at: Option<Instant> = None;
 
     loop {
-        tokio::select! {
-            Some(event) = event_rx.recv() => {
-                match event {
-                    Event::ProcessStarting { id } => {
-                        app.on_process_starting(id);
-                        let name = app
-                            .processes
-                            .get(id)
-                            .map(|p| p.spec.name.as_str())
-                            .unwrap_or("process");
-                        app.set_status_message(format!("Starting {}", name));
-                        if let Some(spec) = app.processes.get(id).map(|p| &p.spec) {
-                            let cmd = format_command(spec);
-                            emit_tool_message(
-                                id,
-                                format!("starting: {}", cmd),
-                                &mut app,
-                                &settings,
-                                &mut output_state,
-                            );
-                        }
-                    }
-                    Event::ProcessStarted { id, pid } => app.on_process_started(id, pid),
-                    Event::ProcessReady { id } => {
-                        app.on_process_ready(id);
-                        let name = app
-                            .processes
-                            .get(id)
-                            .map(|p| p.spec.name.as_str())
-                            .unwrap_or("process");
-                        app.set_status_message(format!("{} ready", name));
-                        emit_tool_message(
-                            id,
-                            "ready".to_string(),
-                            &mut app,
-                            &settings,
-                            &mut output_state,
-                        );
-                        if let Err(e) = manager.mark_ready(id).await {
-                             app.on_process_failed(id, e.to_string());
-                        }
-                    }
-                    Event::ProcessWaiting { id, deps } => {
-                        let name = app
-                            .processes
-                            .get(id)
-                            .map(|p| p.spec.name.as_str())
-                            .unwrap_or("process");
-                        let waiting_on = if deps.is_empty() {
-                            "dependencies".to_string()
-                        } else {
-                            deps.join(", ")
-                        };
-                        app.set_status_message(format!("{} waiting for {}", name, waiting_on));
-                        emit_tool_message(
-                            id,
-                            format!("waiting for {}", waiting_on),
-                            &mut app,
-                            &settings,
-                            &mut output_state,
-                        );
-                    }
-                    Event::ProcessOutput { id, line, stream } => {
-                        let line_for_output = line.clone();
-                        app.on_process_output(id, line, stream);
-                        if settings.no_ui {
-                            output_state.handle_event(
-                                &Event::ProcessOutput { id, line: line_for_output, stream },
-                                &app,
-                                &settings,
-                            );
-                        } else {
-                            output_state.log_event(id, &line_for_output, &app, &settings);
-                        }
-                    }
-                    Event::ProcessExited { id, code } => {
-                        app.on_process_exited(id, code);
-                        let name = app
-                            .processes
-                            .get(id)
-                            .map(|p| p.spec.name.as_str())
-                            .unwrap_or("process");
-                        if !shutdown_in_progress {
-                            let signal_recent = last_signal_at
-                                .map(|at| at.elapsed() < MIN_SIGNAL_DISPLAY)
-                                .unwrap_or(false);
-                            if !signal_recent {
-                                let message = match code {
-                                    Some(0) => format!("{} exited successfully", name),
-                                    Some(code) => format!("{} exited with code {}", name, code),
-                                    None => format!("{} exited", name),
-                                };
-                                app.set_status_message(message);
-                            }
-                        }
-                        let line = match code {
-                            Some(0) => "process ended successfully".to_string(),
-                            Some(code) => format!("process ended with code {}", code),
-                            None => "process ended".to_string(),
-                        };
-                        emit_tool_message(id, line, &mut app, &settings, &mut output_state);
-                        let restart_info = if shutdown_in_progress {
-                            None
-                        } else {
-                            handle_restart(
-                                id,
-                                code,
-                                &app,
-                                &settings,
-                                &mut restart_attempts,
-                                &event_tx,
-                            )
-                        };
-                        if let Some(info) = restart_info {
-                            emit_tool_message(
-                                id,
-                                format_restart_message(&info),
-                                &mut app,
-                                &settings,
-                                &mut output_state,
-                            );
-                        }
-                        if shutdown_in_progress {
-                            output_state.handle_exit(id, code);
-                            let ready_to_exit = output_state.all_exited()
-                                && shutdown_started_at
-                                    .map(|start| start.elapsed() >= MIN_SHUTDOWN_DISPLAY)
-                                    .unwrap_or(false);
-                            if ready_to_exit {
-                                app.should_quit = true;
-                            }
-                        } else {
-                            handle_exit_policy(
-                                id,
-                                code,
-                                &mut app,
-                                &settings,
-                                &mut output_state,
-                                &mut manager,
-                                &mut result,
-                            )
-                            .await;
-                        }
-                    }
-                    Event::ProcessFailed { id, error } => {
-                        let error_message = error.clone();
-                        app.on_process_failed(id, error);
-                        let name = app
-                            .processes
-                            .get(id)
-                            .map(|p| p.spec.name.as_str())
-                            .unwrap_or("process");
-                        if !shutdown_in_progress {
-                            let signal_recent = last_signal_at
-                                .map(|at| at.elapsed() < MIN_SIGNAL_DISPLAY)
-                                .unwrap_or(false);
-                            if !signal_recent {
-                                let message = format!("{} failed: {}", name, error_message);
-                                app.set_status_message(message);
-                            }
-                        }
-                        emit_tool_message(
-                            id,
-                            format!("process failed: {}", error_message),
-                            &mut app,
-                            &settings,
-                            &mut output_state,
-                        );
-                        let restart_info = if shutdown_in_progress {
-                            None
-                        } else {
-                            handle_restart(
-                                id,
-                                Some(1),
-                                &app,
-                                &settings,
-                                &mut restart_attempts,
-                                &event_tx,
-                            )
-                        };
-                        if let Some(info) = restart_info {
-                            emit_tool_message(
-                                id,
-                                format_restart_message(&info),
-                                &mut app,
-                                &settings,
-                                &mut output_state,
-                            );
-                        }
-                        if shutdown_in_progress {
-                            output_state.handle_exit(id, Some(1));
-                            let ready_to_exit = output_state.all_exited()
-                                && shutdown_started_at
-                                    .map(|start| start.elapsed() >= MIN_SHUTDOWN_DISPLAY)
-                                    .unwrap_or(false);
-                            if ready_to_exit {
-                                app.should_quit = true;
-                            }
-                        } else {
-                            handle_exit_policy(
-                                id,
-                                Some(1),
-                                &mut app,
-                                &settings,
-                                &mut output_state,
-                                &mut manager,
-                                &mut result,
-                            )
-                            .await;
-                        }
-                    }
-                    Event::ProcessSignal { id, signal } => {
-                        let name = app
-                            .processes
-                            .get(id)
-                            .map(|p| p.spec.name.as_str())
-                            .unwrap_or("process");
-                        let label = signal.label();
-                        if shutdown_in_progress || shutdown_pending.is_some() {
-                            app.set_status_warning_persistent(format!(
-                                "shutting down — sent {} to {}",
-                                label, name
-                            ));
-                        } else {
-                            last_signal_at = Some(Instant::now());
-                            app.set_status_warning_for(
-                                format!("sent {} to {}", label, name),
-                                MIN_SIGNAL_DISPLAY,
-                            );
-                        }
-                        emit_tool_message(
-                            id,
-                            format!("sent {}", label),
-                            &mut app,
-                            &settings,
-                            &mut output_state,
-                        );
-                    }
-                    Event::Restart { id } => {
-                        if let Err(err) = manager.restart_process(id).await {
-                            app.on_process_failed(id, err.to_string());
-                        }
-                    }
-                    Event::Shutdown { signal } => {
-                        if !shutdown_in_progress {
-                            let label = signal.label();
-                            app.should_quit = false;
-                            app.set_status_warning_persistent(format!(
-                                "received {}, shutting down",
-                                label
-                            ));
-                            shutdown_pending = Some(signal);
-                            shutdown_dispatch_at = if settings.no_ui {
-                                Some(Instant::now())
-                            } else {
-                                None
-                            };
-                        }
-                    }
-                    Event::Stdin(bytes) => {
-                        if let Err(err) = manager.send_input_bytes_to_all(&bytes).await {
-                            app.set_status_message(format!("Input failed: {}", err));
-                        }
-                    }
-                    Event::Key(key) => {
-                        let action = app.handle_key(key);
-                        handle_app_action(
-                            action,
-                            &mut app,
-                            &mut manager,
-                            &mut restart_attempts,
-                            &event_tx,
-                        )
-                        .await;
-                    }
-                    Event::Mouse(mouse) => {
-                        let action = app.handle_mouse(mouse);
-                        handle_app_action(
-                            action,
-                            &mut app,
-                            &mut manager,
-                            &mut restart_attempts,
-                            &event_tx,
-                        )
-                        .await;
-                    }
-                    Event::Resize { width, height } => {
-                        let _ = (width, height);
-                        if let Some(term) = terminal.as_mut() {
-                            let _ = term.autoresize();
-                        }
-                    }
-                }
-
-            }
+        let event = tokio::select! {
+            biased;
+            Some(event) = event_rx.recv() => event,
+            Some(event) = output_rx.recv() => event,
             _ = ticker.tick() => {
                 manager.poll_exits().await;
                 if let Some(signal) = shutdown_pending {
@@ -532,13 +250,309 @@ async fn main() -> Result<()> {
                 {
                     app.should_quit = true;
                 }
+                continue;
+            }
+        };
+
+        match event {
+            Event::ProcessStarting { id } => {
+                app.on_process_starting(id);
+                let name = app
+                    .processes
+                    .get(id)
+                    .map(|p| p.spec.name.as_str())
+                    .unwrap_or("process");
+                app.set_status_message(format!("Starting {}", name));
+                if let Some(spec) = app.processes.get(id).map(|p| &p.spec) {
+                    let cmd = format_command(spec);
+                    emit_tool_message(
+                        id,
+                        format!("starting: {}", cmd),
+                        &mut app,
+                        &settings,
+                        &mut output_state,
+                    );
+                }
+            }
+            Event::ProcessStarted { id, pid } => app.on_process_started(id, pid),
+            Event::ProcessReady { id } => {
+                app.on_process_ready(id);
+                let name = app
+                    .processes
+                    .get(id)
+                    .map(|p| p.spec.name.as_str())
+                    .unwrap_or("process");
+                app.set_status_message(format!("{} ready", name));
+                emit_tool_message(
+                    id,
+                    "ready".to_string(),
+                    &mut app,
+                    &settings,
+                    &mut output_state,
+                );
+                if let Err(e) = manager.mark_ready(id).await {
+                     app.on_process_failed(id, e.to_string());
+                }
+            }
+            Event::ProcessWaiting { id, deps } => {
+                let name = app
+                    .processes
+                    .get(id)
+                    .map(|p| p.spec.name.as_str())
+                    .unwrap_or("process");
+                let waiting_on = if deps.is_empty() {
+                    "dependencies".to_string()
+                } else {
+                    deps.join(", ")
+                };
+                app.set_status_message(format!("{} waiting for {}", name, waiting_on));
+                emit_tool_message(
+                    id,
+                    format!("waiting for {}", waiting_on),
+                    &mut app,
+                    &settings,
+                    &mut output_state,
+                );
+            }
+            Event::ProcessOutput { id, line, stream } => {
+                let line_for_output = line.clone();
+                app.on_process_output(id, line, stream);
+                if settings.no_ui {
+                    output_state.handle_event(
+                        &Event::ProcessOutput { id, line: line_for_output, stream },
+                        &app,
+                        &settings,
+                    );
+                } else {
+                    output_state.log_event(id, &line_for_output, &app, &settings);
+                }
+            }
+            Event::ProcessExited { id, code } => {
+                app.on_process_exited(id, code);
+                let name = app
+                    .processes
+                    .get(id)
+                    .map(|p| p.spec.name.as_str())
+                    .unwrap_or("process");
+                if !shutdown_in_progress {
+                    let signal_recent = last_signal_at
+                        .map(|at| at.elapsed() < MIN_SIGNAL_DISPLAY)
+                        .unwrap_or(false);
+                    if !signal_recent {
+                        let message = match code {
+                            Some(0) => format!("{} exited successfully", name),
+                            Some(code) => format!("{} exited with code {}", name, code),
+                            None => format!("{} exited", name),
+                        };
+                        app.set_status_message(message);
+                    }
+                }
+                let line = match code {
+                    Some(0) => "process ended successfully".to_string(),
+                    Some(code) => format!("process ended with code {}", code),
+                    None => "process ended".to_string(),
+                };
+                emit_tool_message(id, line, &mut app, &settings, &mut output_state);
+                let restart_info = if shutdown_in_progress {
+                    None
+                } else {
+                    handle_restart(
+                        id,
+                        code,
+                        &app,
+                        &settings,
+                        &mut restart_attempts,
+                        &event_tx,
+                    )
+                };
+                if let Some(info) = restart_info {
+                    emit_tool_message(
+                        id,
+                        format_restart_message(&info),
+                        &mut app,
+                        &settings,
+                        &mut output_state,
+                    );
+                }
+                if shutdown_in_progress {
+                    output_state.handle_exit(id, code);
+                    let ready_to_exit = output_state.all_exited()
+                        && shutdown_started_at
+                            .map(|start| start.elapsed() >= MIN_SHUTDOWN_DISPLAY)
+                            .unwrap_or(false);
+                    if ready_to_exit {
+                        app.should_quit = true;
+                    }
+                } else {
+                    handle_exit_policy(
+                        id,
+                        code,
+                        &mut app,
+                        &settings,
+                        &mut output_state,
+                        &mut manager,
+                        &mut result,
+                    )
+                    .await;
+                }
+            }
+            Event::ProcessFailed { id, error } => {
+                let error_message = error.clone();
+                app.on_process_failed(id, error);
+                let name = app
+                    .processes
+                    .get(id)
+                    .map(|p| p.spec.name.as_str())
+                    .unwrap_or("process");
+                if !shutdown_in_progress {
+                    let signal_recent = last_signal_at
+                        .map(|at| at.elapsed() < MIN_SIGNAL_DISPLAY)
+                        .unwrap_or(false);
+                    if !signal_recent {
+                        let message = format!("{} failed: {}", name, error_message);
+                        app.set_status_message(message);
+                    }
+                }
+                emit_tool_message(
+                    id,
+                    format!("process failed: {}", error_message),
+                    &mut app,
+                    &settings,
+                    &mut output_state,
+                );
+                let restart_info = if shutdown_in_progress {
+                    None
+                } else {
+                    handle_restart(
+                        id,
+                        Some(1),
+                        &app,
+                        &settings,
+                        &mut restart_attempts,
+                        &event_tx,
+                    )
+                };
+                if let Some(info) = restart_info {
+                    emit_tool_message(
+                        id,
+                        format_restart_message(&info),
+                        &mut app,
+                        &settings,
+                        &mut output_state,
+                    );
+                }
+                if shutdown_in_progress {
+                    output_state.handle_exit(id, Some(1));
+                    let ready_to_exit = output_state.all_exited()
+                        && shutdown_started_at
+                            .map(|start| start.elapsed() >= MIN_SHUTDOWN_DISPLAY)
+                            .unwrap_or(false);
+                    if ready_to_exit {
+                        app.should_quit = true;
+                    }
+                } else {
+                    handle_exit_policy(
+                        id,
+                        Some(1),
+                        &mut app,
+                        &settings,
+                        &mut output_state,
+                        &mut manager,
+                        &mut result,
+                    )
+                    .await;
+                }
+            }
+            Event::ProcessSignal { id, signal } => {
+                let name = app
+                    .processes
+                    .get(id)
+                    .map(|p| p.spec.name.as_str())
+                    .unwrap_or("process");
+                let label = signal.label();
+                if shutdown_in_progress || shutdown_pending.is_some() {
+                    app.set_status_warning_persistent(format!(
+                        "shutting down — sent {} to {}",
+                        label, name
+                    ));
+                } else {
+                    last_signal_at = Some(Instant::now());
+                    app.set_status_warning_for(
+                        format!("sent {} to {}", label, name),
+                        MIN_SIGNAL_DISPLAY,
+                    );
+                }
+                emit_tool_message(
+                    id,
+                    format!("sent {}", label),
+                    &mut app,
+                    &settings,
+                    &mut output_state,
+                );
+            }
+            Event::Restart { id } => {
+                if let Err(err) = manager.restart_process(id).await {
+                    app.on_process_failed(id, err.to_string());
+                }
+            }
+            Event::Shutdown { signal } => {
+                if !shutdown_in_progress {
+                    let label = signal.label();
+                    app.should_quit = false;
+                    app.set_status_warning_persistent(format!(
+                        "received {}, shutting down",
+                        label
+                    ));
+                    shutdown_pending = Some(signal);
+                    shutdown_dispatch_at = if settings.no_ui {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
+                }
+            }
+            Event::Stdin(bytes) => {
+                if let Err(err) = manager.send_input_bytes_to_all(&bytes).await {
+                    app.set_status_message(format!("Input failed: {}", err));
+                }
+            }
+            Event::Key(key) => {
+                let action = app.handle_key(key);
+                handle_app_action(
+                    action,
+                    &mut app,
+                    &mut manager,
+                    &mut restart_attempts,
+                    &event_tx,
+                )
+                .await;
+            }
+            Event::Mouse(mouse) => {
+                let action = app.handle_mouse(mouse);
+                handle_app_action(
+                    action,
+                    &mut app,
+                    &mut manager,
+                    &mut restart_attempts,
+                    &event_tx,
+                )
+                .await;
+            }
+            Event::Resize { width, height } => {
+                let _ = (width, height);
+                if let Some(term) = terminal.as_mut() {
+                    let _ = term.autoresize();
+                }
             }
         }
 
         if let Some(term) = terminal.as_mut() {
-            if let Err(err) = tui::draw(&mut app, term) {
-                result = Err(err.into());
-                break;
+            if last_draw.elapsed() >= draw_interval {
+                if let Err(err) = tui::draw(&mut app, term) {
+                    result = Err(err.into());
+                    break;
+                }
+                last_draw = Instant::now();
             }
         }
         if shutdown_pending.is_some() && shutdown_dispatch_at.is_none() && !settings.no_ui {

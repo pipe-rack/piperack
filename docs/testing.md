@@ -39,6 +39,9 @@ cargo llvm-cov
 - Verify shutdown UX:
   - `q` shows persistent "shutting down" status and exits cleanly.
   - `k` shows "sent SIGINT" immediately for a process.
+- Verify high-volume output doesn't freeze the UI:
+  - `cargo run -- -- --name spam -- sh -c "yes | head -n 100000"`
+  - UI stays responsive; you can still select and kill the process.
 - Verify clipboard selection:
   - Mouse drag selects log lines.
   - Ctrl+C copies selection; if none, copies full selected process buffer.
