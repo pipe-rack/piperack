@@ -825,7 +825,7 @@ checksum = "3b3cff922bd51709b605d9ead9aa71031d81447142d828eb4a6eba76fe619f9b"
 
 [[package]]
 name = "piperack"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1112,7 +1112,7 @@ dependencies = [
 
 [[package]]
 name = "stability"
-version = "0.2.2"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d904e7009df136af5297832a3ace3370cd14ff1546a232f4f185036c2736fcac"
 dependencies = [
