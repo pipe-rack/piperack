@@ -30,7 +30,7 @@ use crate::app::{App, AppAction};
 use crate::config::ProcessConfig;
 use crate::events::{Event, ProcessSignal};
 use crate::output::StreamKind;
-use crate::process::{ProcessSpec, ProcessState};
+use crate::process::{ProcessSpec, ProcessState, ProcessStatus};
 use crate::runner::{ProcessManager, ShutdownConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -1540,7 +1540,9 @@ async fn handle_exit_policy(
                         *result = Err(anyhow!("last process failed"));
                     }
                 }
-                app.should_quit = true;
+                if settings.no_ui {
+                    app.should_quit = true;
+                }
             }
         }
         SuccessPolicy::All => {
@@ -1548,7 +1550,9 @@ async fn handle_exit_policy(
                 if output_state.any_failed() {
                     *result = Err(anyhow!("one or more processes failed"));
                 }
-                app.should_quit = true;
+                if settings.no_ui {
+                    app.should_quit = true;
+                }
             }
         }
     }
@@ -1563,12 +1567,22 @@ async fn handle_app_action(
 ) {
     match action {
         AppAction::Quit => {
-            app.should_quit = false;
-            let _ = event_tx
-                .send(Event::Shutdown {
-                    signal: ProcessSignal::SigInt,
-                })
-                .await;
+            let all_stopped = app.processes.iter().all(|process| {
+                matches!(
+                    process.status,
+                    ProcessStatus::Idle | ProcessStatus::Exited { .. } | ProcessStatus::Failed { .. }
+                )
+            });
+            if all_stopped {
+                app.should_quit = true;
+            } else {
+                app.should_quit = false;
+                let _ = event_tx
+                    .send(Event::Shutdown {
+                        signal: ProcessSignal::SigInt,
+                    })
+                    .await;
+            }
         }
         AppAction::Kill(id) => {
             manager
