@@ -1732,6 +1732,92 @@ mod tests {
         assert_eq!(backoff_delay(1, &settings), Duration::from_millis(250));
     }
 
+    fn test_spec(name: &str) -> ProcessSpec {
+        ProcessSpec {
+            name: name.to_string(),
+            cmd: "echo".to_string(),
+            args: vec!["ok".to_string()],
+            cwd: None,
+            color: None,
+            env: HashMap::new(),
+            restart_on_fail: false,
+            follow: true,
+            pre_cmd: None,
+            watch_paths: Vec::new(),
+            watch_ignore: Vec::new(),
+            watch_ignore_gitignore: false,
+            watch_debounce_ms: 200,
+            depends_on: Vec::new(),
+            ready_check: None,
+            tags: Vec::new(),
+        }
+    }
+
+    fn test_settings(success: SuccessPolicy, no_ui: bool) -> RunSettings {
+        RunSettings {
+            max_lines: 100,
+            use_symbols: false,
+            no_ui,
+            raw: true,
+            prefix: None,
+            prefix_length: None,
+            prefix_colors: false,
+            timestamp: false,
+            output_mode: OutputMode::Combined,
+            success,
+            kill_others: false,
+            kill_others_on_fail: false,
+            restart_tries: None,
+            restart_delay_ms: None,
+            shutdown_sigint_ms: 0,
+            shutdown_sigterm_ms: 0,
+            input_enabled: true,
+            log_file: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn success_last_keeps_tui_open_after_all_exited() {
+        let specs = vec![test_spec("a"), test_spec("b")];
+        let settings = test_settings(SuccessPolicy::Last, false);
+        let mut app = App::new(specs.clone(), settings.max_lines, settings.use_symbols, true);
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let (output_tx, _output_rx) = mpsc::channel(4);
+        let shutdown = ShutdownConfig::new(settings.shutdown_sigint_ms, settings.shutdown_sigterm_ms);
+        let mut manager = ProcessManager::new(specs, event_tx, output_tx, shutdown, false);
+        let mut output_state = OutputState::new(&app.processes, &settings);
+        let mut result = Ok(());
+
+        handle_exit_policy(0, Some(0), &mut app, &settings, &mut output_state, &mut manager, &mut result)
+            .await;
+        assert!(!app.should_quit);
+        handle_exit_policy(1, Some(0), &mut app, &settings, &mut output_state, &mut manager, &mut result)
+            .await;
+        assert!(!app.should_quit);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn success_all_keeps_tui_open_after_all_exited() {
+        let specs = vec![test_spec("a"), test_spec("b")];
+        let settings = test_settings(SuccessPolicy::All, false);
+        let mut app = App::new(specs.clone(), settings.max_lines, settings.use_symbols, true);
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let (output_tx, _output_rx) = mpsc::channel(4);
+        let shutdown = ShutdownConfig::new(settings.shutdown_sigint_ms, settings.shutdown_sigterm_ms);
+        let mut manager = ProcessManager::new(specs, event_tx, output_tx, shutdown, false);
+        let mut output_state = OutputState::new(&app.processes, &settings);
+        let mut result = Ok(());
+
+        handle_exit_policy(0, Some(0), &mut app, &settings, &mut output_state, &mut manager, &mut result)
+            .await;
+        assert!(!app.should_quit);
+        handle_exit_policy(1, Some(0), &mut app, &settings, &mut output_state, &mut manager, &mut result)
+            .await;
+        assert!(!app.should_quit);
+        assert!(result.is_ok());
+    }
+
     #[test]
     fn format_command_joins_args() {
         let spec = ProcessSpec {
