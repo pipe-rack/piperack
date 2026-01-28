@@ -56,6 +56,8 @@ piperack --config examples/full_stack.toml
 
 No config DSL. Just type-safe TOML.
 
+> **Tip:** Use the official Gemini CLI skill to generate this automatically: `npx skills add pipe-rack/skills`.
+
 ```toml
 # piperack.toml
 # Defaults that make sense.
