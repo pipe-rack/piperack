@@ -13,6 +13,7 @@ mod output;
 mod process;
 mod runner;
 mod tui;
+mod update;
 mod watch;
 
 use std::collections::{HashMap, HashSet};
@@ -32,6 +33,7 @@ use crate::events::{Event, ProcessSignal};
 use crate::output::StreamKind;
 use crate::process::{ProcessSpec, ProcessState, ProcessStatus};
 use crate::runner::{ProcessManager, ShutdownConfig};
+use crate::update::check_for_update;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum OutputMode {
@@ -177,6 +179,7 @@ async fn main() -> Result<()> {
 
     let (event_tx, mut event_rx) = mpsc::channel(256);
     let (output_tx, mut output_rx) = mpsc::channel(256);
+    spawn_update_check(event_tx.clone());
     let shutdown = ShutdownConfig::new(settings.shutdown_sigint_ms, settings.shutdown_sigterm_ms);
     let mut manager = ProcessManager::new(
         specs.clone(),
@@ -219,6 +222,7 @@ async fn main() -> Result<()> {
     let mut shutdown_started_at: Option<Instant> = None;
     const MIN_SHUTDOWN_DISPLAY: Duration = Duration::from_millis(1500);
     const MIN_SIGNAL_DISPLAY: Duration = Duration::from_millis(1500);
+    const UPDATE_HINT_TTL: Duration = Duration::from_secs(10);
     let mut shutdown_pending: Option<ProcessSignal> = None;
     let mut shutdown_dispatch_at: Option<Instant> = None;
     let mut last_signal_at: Option<Instant> = None;
@@ -495,6 +499,18 @@ async fn main() -> Result<()> {
                     app.on_process_failed(id, err.to_string());
                 }
             }
+            Event::UpdateAvailable { current, latest } => {
+                let message = format!(
+                    "update available: {} -> {} (see GitHub Releases)",
+                    current, latest
+                );
+                if settings.no_ui {
+                    let line = format_tool_message(&message, settings.use_symbols);
+                    eprintln!("{}", line);
+                } else {
+                    app.set_status_warning_for(message, UPDATE_HINT_TTL);
+                }
+            }
             Event::Shutdown { signal } => {
                 if !shutdown_in_progress {
                     let label = signal.label();
@@ -614,6 +630,19 @@ fn spawn_signal_listener(tx: mpsc::Sender<Event>) {
             let _ = tx
                 .send(Event::Shutdown {
                     signal: ProcessSignal::SigInt,
+                })
+                .await;
+        }
+    });
+}
+
+fn spawn_update_check(tx: mpsc::Sender<Event>) {
+    tokio::spawn(async move {
+        if let Some(info) = check_for_update().await {
+            let _ = tx
+                .send(Event::UpdateAvailable {
+                    current: info.current,
+                    latest: info.latest,
                 })
                 .await;
         }

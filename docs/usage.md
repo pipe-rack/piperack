@@ -51,6 +51,14 @@ piperack --names "api,web" "cargo run" "npm start"
 | `--no-input` | Disable input forwarding. |
 | `--log-file <tpl>` | Log file template (e.g. `logs/{name}.log`). |
 
+### Update Hints
+
+By default, Piperack checks GitHub Releases at most once per day and shows a one-line hint if a newer version is available. To disable the check:
+
+```bash
+PIPERACK_NO_UPDATE_CHECK=1 piperack
+```
+
 ### Inline Process Definition
 
 When defining processes inline with `--name <name> ... -- <cmd>`, you can use these flags **before** the `--` separator:

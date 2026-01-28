@@ -49,6 +49,8 @@ pub enum Event {
     ProcessSignal { id: usize, signal: ProcessSignal },
     /// A request to restart a process.
     Restart { id: usize },
+    /// A newer version is available.
+    UpdateAvailable { current: String, latest: String },
     /// The application received a shutdown signal (e.g. SIGINT/SIGTERM).
     Shutdown { signal: ProcessSignal },
     /// Raw bytes received from the application's standard input.
