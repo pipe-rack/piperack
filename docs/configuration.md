@@ -4,16 +4,16 @@ Piperack is configured via a `piperack.toml` file in your project root. If no co
 
 ## Automated Configuration (AI Skill)
 
-If you are using the [Gemini CLI](https://ai.google.dev/gemini-api/docs/cli), you can use the official Piperack skill to automatically generate a configuration file based on your project structure.
+You can use the official Piperack skill to automatically generate a configuration file based on your project structure. This works with **Gemini, Claude, Cursor, and other agents** that support the `skills` protocol.
 
 1.  **Install the skill**:
     ```bash
     npx skills add pipe-rack/skills
     ```
 
-2.  **Ask Gemini**:
+2.  **Ask your Agent**:
     ```text
-    @gemini Help me configure piperack for this repo
+    Help me configure piperack for this repo
     ```
 
 The skill will analyze your project (detecting `package.json`, `Cargo.toml`, `docker-compose.yml`, etc.) and propose a complete `piperack.toml` with appropriate ready checks and dependencies.
